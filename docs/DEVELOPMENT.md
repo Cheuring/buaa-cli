@@ -36,12 +36,18 @@ The same executable acts as client or daemon. Initial automation is Boya:
 - Added Boya quota policies, periodic selected-course discovery, individual
   check-in/out planning, remote enrollment confirmation and background CAPTCHA
   errors. Original interactive commands still use their existing handlers.
-- Eight tests pass, including real loopback IPC with a mock handler, priority
-  preemption, interrupted-task recovery, retry backoff and state-file validation.
+- Tests cover real loopback IPC with a mock handler, priority preemption,
+  interrupted-task recovery, retry backoff, state-file validation, serial quota
+  enforcement, remote enrollment confirmation and actual CLI process lifecycle.
   Loopback tests need network permission outside the desktop filesystem sandbox.
-- `cargo clippy --offline --all-targets -- -D warnings` passed before the added
-  IPC tests; final full checks, CLI process smoke tests and live read-only API
-  compatibility checks are still in progress.
+- Auth snapshots use short OS locks and atomic writes. Stale background sessions
+  do not overwrite a newer login. CookieStore has different Serde vs file formats;
+  always use its dedicated reader/writer for file compatibility (regression test).
+- Read-only live API check passed: queried 100 courses on page 1, 2 selected
+  self-service courses and 2 unexpired sign windows. No real selection, drop,
+  check-in or check-out was submitted. Credentials were only refreshed normally.
+- Default suite and strict Clippy passed. Final crash-recovery check, release
+  build, user documentation and fork push are in progress.
 
 ## Working rules
 

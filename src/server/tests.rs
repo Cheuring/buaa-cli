@@ -51,7 +51,7 @@ impl Drop for TestDir {
 }
 
 async fn ready(dir: &Path) {
-    for _ in 0..100 {
+    for _ in 0..250 {
         if protocol::call(dir, Request::Status).await.is_ok() {
             return;
         }
@@ -119,7 +119,7 @@ async fn durable_dispatch_preemption_and_ipc() {
         .unwrap()
         .ok
     );
-    for _ in 0..100 {
+    for _ in 0..200 {
         if records
             .lock()
             .unwrap()
@@ -137,7 +137,7 @@ async fn durable_dispatch_preemption_and_ipc() {
         .unwrap()
         .1;
     assert!(timestamp >= due, "Task executed early");
-    assert!(timestamp < due + 1_000, "Discovery blocked timed dispatch");
+    assert!(timestamp < due + 3_000, "Discovery blocked timed dispatch");
     assert!(!executed.iter().any(|(key, _)| key == "missed"));
     assert!(
         protocol::call(

@@ -44,7 +44,22 @@ pub fn directory(data_dir: &Path) -> PathBuf {
 }
 
 pub async fn client(data_dir: &Path, request: Request) -> io::Result<()> {
-    let response = protocol::call(&directory(data_dir), request).await?;
+    let dir = directory(data_dir);
+    let status = matches!(request, Request::Status);
+    let stop = matches!(request, Request::Stop);
+    let response = match protocol::call(&dir, request).await {
+        Ok(response) => response,
+        Err(_) if (status || stop) && (!dir.exists() || storage::lock(&dir).is_ok()) => Response {
+            ok: true,
+            message: "Stopped; run `buaa server start` to resume pending tasks".into(),
+            state: if status {
+                Some(storage::load_state(&dir)?)
+            } else {
+                None
+            },
+        },
+        Err(error) => return Err(error),
+    };
     if !response.ok {
         return Err(io::Error::other(response.message));
     }
@@ -167,6 +182,7 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
     tokio::pin!(shutdown);
     loop {
         if state.expire(now_ms()) {
+            state.compact(now_ms());
             storage::write_json(&dir.join("state.json"), &state)?;
         }
         if let Some((task, _)) = &active
@@ -249,6 +265,10 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
                 let (task, _) = active.take().unwrap();
                 let result = result.unwrap_or_else(|error| Err(format!("Task worker failed: {error}")));
                 finish(&mut state, &task.key, result, now_ms());
+                state.compact(now_ms());
+                if let Some(completed) = state.tasks.iter().find(|t| t.key == task.key) {
+                    println!("[{}] {}: {:?}", now_ms(), completed.key, completed.status);
+                }
                 storage::write_json(&dir.join("state.json"), &state)?;
             },
             _ = tokio::time::sleep(wait) => {},

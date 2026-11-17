@@ -2,6 +2,7 @@
 name = "buaa"
 version = "0.5.0"
 edition = "2024"
+rust-version = "1.89"
 
 [dependencies]
 buaa_api = { git = "https://github.com/fontlos/buaa-api", rev = "1d64194"}

@@ -1,6 +1,7 @@
 //! Boya policies and handlers; scheduler/transport contain no course logic.
 
-use buaa_api::Context;
+mod backend;
+use backend::Backend;
 use buaa_api::api::boya::{Category, Course, SignConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -140,23 +141,18 @@ impl Handler for BoyaHandler {
     }
 
     async fn execute(&self, task: Task, settings: Value) -> Result<Outcome, String> {
-        let auth_path = self.data_dir.join("cred.json");
-        let original_auth = std::fs::read(&auth_path).ok();
-        // Rebuild for every task, picking up an interactive login since last run.
-        let context = crate::auth::context(&self.data_dir, self.disable_tls, false);
-        let result = execute(&context, &task, policy(&settings)?).await;
-        // Do not overwrite credentials replaced by an interactive login while
-        // this task was running. State ownership is otherwise in the daemon.
-        if std::fs::read(&auth_path).ok() == original_auth {
-            context
-                .save_auth(&self.data_dir)
-                .map_err(|e| format!("Failed to save auth: {e}"))?;
-        }
+        // Reload auth for every job, including an interactive login since last run.
+        let session = crate::auth::Session::load(&self.data_dir, self.disable_tls, false)
+            .map_err(|e| e.to_string())?;
+        let result = execute(&session.context, &task, policy(&settings)?).await;
+        session
+            .save(false)
+            .map_err(|e| format!("Failed to save auth: {e}"))?;
         result
     }
 }
 
-async fn execute(context: &Context, task: &Task, config: Policy) -> Result<Outcome, String> {
+async fn execute(context: &impl Backend, task: &Task, config: Policy) -> Result<Outcome, String> {
     match task.kind.as_str() {
         "boya.auto.select.discover" => select_plan(context, &config).await,
         "boya.auto.sign.discover" => sign_discover(context).await,
@@ -164,11 +160,7 @@ async fn execute(context: &Context, task: &Task, config: Policy) -> Result<Outco
         "boya.sign.plan" => {
             let payload: CourseTask =
                 serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
-            let course = context
-                .boya()
-                .query_course(payload.id)
-                .await
-                .map_err(|e| e.to_string())?;
+            let course = context.course(payload.id).await?;
             ensure_selected(context, &course).await?;
             let tasks = sign_tasks(&course, None, now_ms())?;
             if tasks.is_empty() {
@@ -182,19 +174,6 @@ async fn execute(context: &Context, task: &Task, config: Policy) -> Result<Outco
         "boya.sign" => sign_one(context, task).await,
         _ => Err(format!("Unknown task kind: {}", task.kind)),
     }
-}
-
-async fn selected(context: &Context) -> Result<Vec<buaa_api::api::boya::Selected>, String> {
-    let semester = context
-        .boya()
-        .get_semester()
-        .await
-        .map_err(|e| e.to_string())?;
-    context
-        .boya()
-        .query_selected(semester)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 fn counts(courses: &[buaa_api::api::boya::Selected]) -> BTreeMap<String, u32> {
@@ -221,8 +200,8 @@ fn selectable(
         && counts.get(category).copied().unwrap_or(0) < targets.get(category).copied().unwrap_or(0)
 }
 
-async fn select_plan(context: &Context, config: &Policy) -> Result<Outcome, String> {
-    let counts = counts(&selected(context).await?);
+async fn select_plan(context: &impl Backend, config: &Policy) -> Result<Outcome, String> {
+    let counts = counts(&context.selected().await?);
     if config
         .targets
         .iter()
@@ -238,11 +217,7 @@ async fn select_plan(context: &Context, config: &Policy) -> Result<Outcome, Stri
     // The pinned API uses u8 page numbers and page sizes. Scan until the first
     // short page, and reject silent truncation if the API's range is exhausted.
     for page in 1..=u8::MAX {
-        let courses = context
-            .boya()
-            .query_courses(page, 100)
-            .await
-            .map_err(|e| e.to_string())?;
+        let courses = context.courses(page).await?;
         let last = courses.len() < 100;
         for course in courses {
             if !seen.insert(course.id) {
@@ -262,6 +237,7 @@ async fn select_plan(context: &Context, config: &Policy) -> Result<Outcome, Stri
                 task.expires_ms = Some(course.schedule.select_end.timestamp() * 1000);
                 task.group = Some(SELECT.into());
                 task.max_attempts = None;
+                task.replace_finished = true;
                 tasks.push(task);
             }
         }
@@ -275,15 +251,15 @@ async fn select_plan(context: &Context, config: &Policy) -> Result<Outcome, Stri
     Err("Course pagination exceeded the API's 255-page limit".into())
 }
 
-async fn select_one(context: &Context, task: &Task, config: &Policy) -> Result<Outcome, String> {
+async fn select_one(
+    context: &impl Backend,
+    task: &Task,
+    config: &Policy,
+) -> Result<Outcome, String> {
     let payload: CourseTask =
         serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
-    let course = context
-        .boya()
-        .query_course(payload.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let chosen = selected(context).await?;
+    let course = context.course(payload.id).await?;
+    let chosen = context.selected().await?;
     // Reconcile after uncertain results/restarts and before EVERY enrollment.
     // This serial execution prevents multiple candidates overfilling a target.
     if course.selected || chosen.iter().any(|c| c.id == course.id) {
@@ -299,14 +275,10 @@ async fn select_one(context: &Context, task: &Task, config: &Policy) -> Result<O
             ..Outcome::default()
         });
     }
-    context
-        .boya()
-        .select_course(course.id)
-        .await
-        .map_err(|e| e.to_string())?;
+    context.enroll(course.id).await?;
     // select_course's upstream implementation does not parse its status body.
     // Verify remote enrollment rather than interpreting an HTTP response as success.
-    if !selected(context).await?.iter().any(|c| c.id == course.id) {
+    if !context.selected().await?.iter().any(|c| c.id == course.id) {
         return Err("Enrollment was not confirmed by the selected course list".into());
     }
     let tasks = if config.auto_sign {
@@ -320,8 +292,8 @@ async fn select_one(context: &Context, task: &Task, config: &Policy) -> Result<O
     })
 }
 
-async fn ensure_selected(context: &Context, course: &Course) -> Result<(), String> {
-    if course.selected || selected(context).await?.iter().any(|c| c.id == course.id) {
+async fn ensure_selected(context: &impl Backend, course: &Course) -> Result<(), String> {
+    if course.selected || context.selected().await?.iter().any(|c| c.id == course.id) {
         Ok(())
     } else {
         Err("Course is not selected; select it before scheduling check-in/out".into())
@@ -354,23 +326,21 @@ fn sign_tasks(course: &Course, group: Option<&str>, now: i64) -> Result<Vec<Task
             due.max(now),
         );
         task.expires_ms = Some(expiry);
+        task.priority = 20;
+        task.max_attempts = None;
         task.group = group.map(str::to_owned);
         tasks.push(task);
     }
     Ok(tasks)
 }
 
-async fn sign_discover(context: &Context) -> Result<Outcome, String> {
+async fn sign_discover(context: &impl Backend) -> Result<Outcome, String> {
     let mut tasks = Vec::new();
-    for chosen in selected(context).await? {
+    for chosen in context.selected().await? {
         if chosen.schedule.course_end.timestamp() * 1000 + 86_400_000 < now_ms() {
             continue;
         }
-        let course = context
-            .boya()
-            .query_course(chosen.id)
-            .await
-            .map_err(|e| e.to_string())?;
+        let course = context.course(chosen.id).await?;
         if course.sign_config.is_some() {
             tasks.extend(sign_tasks(&course, Some(SIGN), now_ms())?);
         }
@@ -390,14 +360,10 @@ fn sign_window(config: &SignConfig, checkout: bool) -> (i64, i64) {
     (start.timestamp() * 1000, end.timestamp() * 1000)
 }
 
-async fn sign_one(context: &Context, task: &Task) -> Result<Outcome, String> {
+async fn sign_one(context: &impl Backend, task: &Task) -> Result<Outcome, String> {
     let payload: CourseTask =
         serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
-    let course = context
-        .boya()
-        .query_course(payload.id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let course = context.course(payload.id).await?;
     ensure_selected(context, &course).await?;
     let config = course
         .sign_config
@@ -413,18 +379,9 @@ async fn sign_one(context: &Context, task: &Task) -> Result<Outcome, String> {
             ..Outcome::default()
         });
     }
-    let result = if payload.checkout {
-        context
-            .boya()
-            .checkout_course(payload.id, &config.coordinate)
-            .await
-    } else {
-        context
-            .boya()
-            .checkin_course(payload.id, &config.coordinate)
-            .await
-    }
-    .map_err(|e| e.to_string())?;
+    let result = context
+        .sign(payload.id, &config.coordinate, payload.checkout)
+        .await?;
     if !result.is_ok {
         return Err("Boya rejected the sign location/result".into());
     }
@@ -436,6 +393,29 @@ mod tests {
     use super::*;
     use buaa_api::api::boya::{Capacity, Coordinate, Schedule};
     use buaa_api::time::DateTime;
+
+    #[tokio::test]
+    #[ignore = "requires BUAA_LIVE_AUTH_DIR, existing credentials and university network access; read-only"]
+    async fn live_read_only_compatibility() {
+        let path =
+            PathBuf::from(std::env::var_os("BUAA_LIVE_AUTH_DIR").expect("Set BUAA_LIVE_AUTH_DIR"));
+        let session = crate::auth::Session::load(&path, false, false).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            let chosen = session.context.selected().await.unwrap();
+            let courses = session.context.boya().query_courses(1, 100).await.unwrap();
+            let mut self_service = 0;
+            let mut planned = 0;
+            for chosen in &chosen {
+                let course = session.context.boya().query_course(chosen.id).await.unwrap();
+                if course.sign_config.is_some() {
+                    self_service += 1;
+                    planned += sign_tasks(&course, None, now_ms()).unwrap().len();
+                }
+            }
+            println!("Read-only API check: {} listed, {} selected, {} selected self-service, {} future sign windows", courses.len(), chosen.len(), self_service, planned);
+        }).await.expect("Read-only API check timed out");
+        session.save(false).unwrap();
+    }
 
     fn course(id: u32, category: Category, can_sign: bool) -> Course {
         let dt = DateTime::from_timestamp;
@@ -551,6 +531,157 @@ mod tests {
             handler
                 .configure(&mut state, SELECT, json!({"typo": 1}))
                 .is_err()
+        );
+    }
+
+    struct FakeBackend {
+        courses: Vec<Course>,
+        selected: std::sync::Mutex<Vec<buaa_api::api::boya::Selected>>,
+        enrolled: std::sync::Mutex<Vec<u32>>,
+        confirm_enrollment: bool,
+    }
+
+    impl Backend for FakeBackend {
+        async fn selected(&self) -> Result<Vec<buaa_api::api::boya::Selected>, String> {
+            Ok(self.selected.lock().unwrap().clone())
+        }
+        async fn courses(&self, page: u8) -> Result<Vec<Course>, String> {
+            Ok(if page == 1 {
+                self.courses.clone()
+            } else {
+                Vec::new()
+            })
+        }
+        async fn course(&self, id: u32) -> Result<Course, String> {
+            self.courses
+                .iter()
+                .find(|c| c.id == id)
+                .cloned()
+                .ok_or("Unknown fixture course".into())
+        }
+        async fn enroll(&self, id: u32) -> Result<(), String> {
+            self.enrolled.lock().unwrap().push(id);
+            if self.confirm_enrollment {
+                let c = self.course(id).await?;
+                self.selected
+                    .lock()
+                    .unwrap()
+                    .push(buaa_api::api::boya::Selected {
+                        id,
+                        name: c.name,
+                        location: c.location,
+                        schedule: c.schedule,
+                        category: c.category,
+                    });
+            }
+            Ok(())
+        }
+        async fn sign(
+            &self,
+            _id: u32,
+            _coordinate: &Coordinate,
+            _checkout: bool,
+        ) -> Result<buaa_api::api::boya::SignInfo, String> {
+            Ok(buaa_api::api::boya::SignInfo {
+                longitude: 0.0,
+                latitude: 0.0,
+                is_ok: false,
+            })
+        }
+    }
+
+    fn current_course(id: u32, category: Category, can_sign: bool) -> Course {
+        let mut c = course(id, category, can_sign);
+        let now = now_ms() / 1000;
+        c.schedule.select_start = DateTime::from_timestamp(now - 10);
+        c.schedule.select_end = DateTime::from_timestamp(now + 100);
+        c.schedule.course_end = DateTime::from_timestamp(now + 200);
+        if let Some(config) = &mut c.sign_config {
+            config.checkin_start = DateTime::from_timestamp(now - 10);
+            config.checkin_end = DateTime::from_timestamp(now + 100);
+            config.checkout_start = DateTime::from_timestamp(now + 100);
+            config.checkout_end = DateTime::from_timestamp(now + 200);
+        }
+        c
+    }
+
+    #[tokio::test]
+    async fn selection_reconciles_between_candidates_and_confirms_mutations() {
+        let backend = FakeBackend {
+            courses: vec![
+                current_course(1, Category::Arts, true),
+                current_course(2, Category::Arts, true),
+                current_course(3, Category::Arts, false),
+            ],
+            selected: std::sync::Mutex::new(Vec::new()),
+            enrolled: std::sync::Mutex::new(Vec::new()),
+            confirm_enrollment: true,
+        };
+        let config = Policy {
+            targets: BTreeMap::from([("arts".into(), 1)]),
+            auto_sign: true,
+        };
+        let plan = select_plan(&backend, &config).await.unwrap();
+        assert_eq!(plan.tasks.len(), 2); // the non-self-service course is excluded
+        let first = select_one(&backend, &plan.tasks[0], &config).await.unwrap();
+        assert_eq!(first.tasks.len(), 2); // enroll success schedules check-in/out
+        select_one(&backend, &plan.tasks[1], &config).await.unwrap();
+        assert_eq!(*backend.enrolled.lock().unwrap(), vec![1]);
+        // A retry after a crash sees the remote selection and cannot enroll twice.
+        select_one(&backend, &plan.tasks[0], &config).await.unwrap();
+        assert_eq!(*backend.enrolled.lock().unwrap(), vec![1]);
+        assert!(
+            select_plan(&backend, &config)
+                .await
+                .unwrap()
+                .tasks
+                .is_empty()
+        );
+        // Upstream may return HTTP success without actually enrolling a course.
+        let mut rejected = backend;
+        rejected.confirm_enrollment = false;
+        rejected.selected.lock().unwrap().clear();
+        let result = select_one(&rejected, &plan.tasks[0], &config).await;
+        assert!(result.err().unwrap().contains("not confirmed"));
+    }
+
+    #[tokio::test]
+    async fn explicit_sign_requires_selection_and_checks_remote_result() {
+        let backend = FakeBackend {
+            courses: vec![current_course(1, Category::Arts, true)],
+            selected: std::sync::Mutex::new(Vec::new()),
+            enrolled: std::sync::Mutex::new(Vec::new()),
+            confirm_enrollment: true,
+        };
+        let plan = Task::new(
+            "manual".into(),
+            "boya.sign.plan",
+            json!({"id": 1}),
+            now_ms(),
+        );
+        assert!(
+            execute(&backend, &plan, Policy::default())
+                .await
+                .err()
+                .unwrap()
+                .contains("not selected")
+        );
+        backend.enroll(1).await.unwrap();
+        let planned = execute(&backend, &plan, Policy::default()).await.unwrap();
+        assert_eq!(planned.tasks.len(), 2);
+        assert!(
+            sign_one(&backend, &planned.tasks[0])
+                .await
+                .err()
+                .unwrap()
+                .contains("rejected")
+        );
+        assert!(
+            sign_one(&backend, &planned.tasks[1])
+                .await
+                .unwrap()
+                .repeat_after_ms
+                .is_some()
         );
     }
 }

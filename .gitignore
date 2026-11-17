@@ -3,4 +3,7 @@ Cargo.lock
 cookies.json
 cred.json
 captcha.png
+auth.lock
+cookies.tmp
+cred.tmp
 /server/

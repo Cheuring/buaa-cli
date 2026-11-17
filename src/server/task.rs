@@ -34,6 +34,9 @@ pub struct Task {
     #[serde(default)]
     pub preemptible: bool,
     pub max_attempts: Option<u32>,
+    /// An authoritative planner may discover a new need for a finished action.
+    #[serde(default)]
+    pub replace_finished: bool,
     pub status: Status,
     pub attempts: u32,
     pub last_error: Option<String>,
@@ -51,6 +54,7 @@ impl Task {
             priority: 10,
             preemptible: false,
             max_attempts: Some(10),
+            replace_finished: false,
             status: Status::Pending,
             attempts: 0,
             last_error: None,
@@ -89,11 +93,18 @@ impl State {
 
     pub fn enqueue(&mut self, task: Task) {
         if let Some(existing) = self.tasks.iter_mut().find(|t| t.key == task.key) {
+            if (task.replace_finished
+                && matches!(existing.status, Status::Succeeded | Status::Failed))
+                || (task.group.is_none() && existing.status == Status::Failed)
+            {
+                *existing = task;
+                return;
+            }
             // Explicit submissions survive disabling an automatic policy.
             if task.group.is_none() {
                 existing.group = None;
             }
-            // Discovery can update future windows, but must not replay an outcome.
+            // Rediscovery updates pending windows without erasing retry backoff.
             if existing.status == Status::Pending {
                 if existing.attempts == 0 {
                     existing.due_ms = task.due_ms;
@@ -132,6 +143,32 @@ impl State {
             .filter(|(_, t)| t.status == Status::Pending && t.due_ms <= now)
             .min_by_key(|(_, t)| (std::cmp::Reverse(t.priority), t.due_ms))
             .map(|(index, _)| index)
+    }
+
+    /// Keep active-window outcomes for deduplication, plus recent timeless
+    /// outcomes. Old expired windows cannot become runnable after discovery.
+    pub fn compact(&mut self, now: i64) {
+        let mut timeless = self
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.expires_ms.is_none() && !matches!(t.status, Status::Pending | Status::Running)
+            })
+            .count();
+        self.tasks.retain(|task| {
+            if matches!(task.status, Status::Pending | Status::Running) {
+                return true;
+            }
+            if let Some(end) = task.expires_ms {
+                return end >= now - 86_400_000;
+            }
+            if timeless > 100 {
+                timeless -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Bound every relative wait, then read SystemTime again. Clock corrections

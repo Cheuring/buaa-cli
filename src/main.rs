@@ -31,7 +31,15 @@ async fn main() {
         eprintln!("[Error]: Failed to create data directory: {error}");
         std::process::exit(1);
     }
-    let context = auth::context(&path, cli.disable_tls, true);
+    let session = match auth::Session::load(&path, cli.disable_tls, true) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("[Error]: Failed to load auth: {error}");
+            std::process::exit(1);
+        }
+    };
+    let context = &session.context;
+    let explicit_login = matches!(&cli.command, Commands::Login { .. });
 
     match cli.command {
         Commands::Login { username, password } => {
@@ -48,58 +56,58 @@ async fn main() {
         }
         Commands::Boya(Boya { command }) => match command {
             BoyaSub::Query { all, page } => {
-                boya::query(&context, all, page).await;
+                boya::query(context, all, page).await;
             }
             BoyaSub::Select { id } => {
-                boya::select(&context, id).await;
+                boya::select(context, id).await;
             }
             BoyaSub::Drop { id } => {
-                boya::drop(&context, id).await;
+                boya::drop(context, id).await;
             }
             BoyaSub::Check { id } => {
-                boya::check(&context, id).await;
+                boya::check(context, id).await;
             }
             BoyaSub::Selected => {
-                boya::selected(&context).await;
+                boya::selected(context).await;
             }
             BoyaSub::Status => {
-                boya::status(&context).await;
+                boya::status(context).await;
             }
             BoyaSub::Auto(_) => unreachable!("Handled before loading auth"),
         },
         Commands::Class(Class { command }) => match command {
             ClassSub::Auto => {
-                class::auto(&context).await;
+                class::auto(context).await;
             }
             ClassSub::Query { id } => {
-                class::query(&context, id).await;
+                class::query(context, id).await;
             }
             ClassSub::Checkin { id } => {
-                class::checkin(&context, &id).await;
+                class::checkin(context, &id).await;
             }
         },
         Commands::Exam => {
-            exam::exam(&context).await;
+            exam::exam(context).await;
         }
         Commands::Tes(Tes { command }) => match command {
             TesSub::Auto => {
-                tes::auto(&context).await;
+                tes::auto(context).await;
             }
             TesSub::List { all } => {
-                tes::list(&context, all).await;
+                tes::list(context, all).await;
             }
         },
         Commands::Wifi(Wifi { command }) => match command {
             WifiSub::Login => {
-                wifi::login(&context).await;
+                wifi::login(context).await;
             }
             WifiSub::Logout => {
-                wifi::logout(&context).await;
+                wifi::logout(context).await;
             }
         },
         Commands::Server(_) => unreachable!("Handled before loading auth"),
     }
-    match context.save_auth(&path) {
+    match session.save(explicit_login) {
         Ok(_) => {}
         Err(_) => {
             eprintln!("[Error]: Failed to save auth data");
