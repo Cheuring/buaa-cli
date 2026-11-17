@@ -67,6 +67,14 @@ fn discover(group: &str) -> Task {
 }
 
 impl Handler for BoyaHandler {
+    fn reconcile(&self, state: &mut State) {
+        // An enrollment can finish after automatic signing was switched off.
+        // Its snapshot must not reintroduce work from the disabled policy.
+        if !policy(&state.settings).is_ok_and(|config| config.auto_sign) {
+            state.cancel_group(SIGN);
+        }
+    }
+
     fn configure(
         &self,
         state: &mut State,
@@ -506,6 +514,11 @@ mod tests {
         state.enqueue(sign_tasks(&course, None, 310_000).unwrap().remove(0));
         handler.configure(&mut state, SIGN, json!({})).unwrap();
         assert!(!policy(&state.settings).unwrap().auto_sign);
+        assert_eq!(state.tasks.len(), 1);
+        assert!(state.tasks[0].group.is_none());
+        // A selection using an older settings snapshot may finish after toggle.
+        state.enqueue(tasks[1].clone());
+        handler.reconcile(&mut state);
         assert_eq!(state.tasks.len(), 1);
         assert!(state.tasks[0].group.is_none());
     }

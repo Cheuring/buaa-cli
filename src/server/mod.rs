@@ -20,6 +20,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 pub trait Handler: Send + Sync + 'static {
+    /// Revalidate newly produced work against settings changed during execution.
+    fn reconcile(&self, _state: &mut State) {}
     fn configure(
         &self,
         state: &mut State,
@@ -265,6 +267,7 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
                 let (task, _) = active.take().unwrap();
                 let result = result.unwrap_or_else(|error| Err(format!("Task worker failed: {error}")));
                 finish(&mut state, &task.key, result, now_ms());
+                handler.reconcile(&mut state);
                 state.compact(now_ms());
                 if let Some(completed) = state.tasks.iter().find(|t| t.key == task.key) {
                     println!("[{}] {}: {:?}", now_ms(), completed.key, completed.status);

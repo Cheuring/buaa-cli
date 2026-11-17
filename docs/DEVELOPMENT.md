@@ -52,7 +52,9 @@ The same executable acts as client or daemon. Initial automation is Boya:
 - README, changelog and a three-platform CI check workflow are added. The final
   release binary passed isolated start/status/configure/off smoke tests, and the
   original `boya selected` command passed using the existing account (read-only).
-- Implementation is complete; fork push and remote CI verification are pending.
+- The branch is pushed to `self_fork` (`Cheuring/buaa-cli`); remote CI verification
+  is in progress. A final policy reconciliation prevents an in-flight enrollment
+  using older settings from adding sign tasks after automatic signing is disabled.
 
 ## Extension points and operational details
 
@@ -60,7 +62,8 @@ The same executable acts as client or daemon. Initial automation is Boya:
   and bounded wall-clock waits. It has no dependency on Boya types or semantics.
 - `src/server/mod.rs`: single-owner state loop and the `Handler` interface.
   `configure`/`submit` validate client operations; `execute` returns new tasks or
-  a recurrence delay. Future domains can be composed in an application handler.
+  a recurrence delay; `reconcile` validates results against the latest settings.
+  Future domains can be composed in an application handler.
 - A single action runs at a time, serializing quota mutations. Read-only discovery
   is marked preemptible and low priority; check-in/out has higher priority than
   selection. Tasks have a 45-second timeout. Network latency can delay actions;
