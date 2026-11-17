@@ -145,7 +145,7 @@ pub async fn checkin_schedule(context: &Context, id: &str) {
 fn parse_datetime(s: &str) -> Result<DateTime, &'static str> {
     let year = s[0..4].parse::<i32>().map_err(|_| "Invalid year")?;
     let month = s[4..6].parse::<u32>().map_err(|_| "Invalid month")?;
-    let month = Month::from_num(month).ok_or_else(|| "Invalid month")?;
+    let month = Month::from_num(month).ok_or("Invalid month")?;
     let day = s[6..8].parse::<u32>().map_err(|_| "Invalid day")?;
     DateTime::from_calendar(year, month, day, 0, 0, 0)
 }

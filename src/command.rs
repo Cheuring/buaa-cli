@@ -1,11 +1,11 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(version = env!("CARGO_PKG_VERSION"), about = "A cli for BUAA")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
-    #[arg(short, long, default_value_t = false)]
+    #[arg(short, long, global = true, default_value_t = false)]
     pub disable_tls: bool,
 }
 
@@ -28,6 +28,8 @@ pub enum Commands {
     Tes(Tes),
     #[command(about = "BUAA-Wifi")]
     Wifi(Wifi),
+    /// Manage the local background task server
+    Server(Server),
 }
 
 #[derive(Parser, Debug)]
@@ -57,6 +59,84 @@ pub enum BoyaSub {
     Selected,
     /// Query statistics information
     Status,
+    /// Configure resident Boya automation (requires `server start`)
+    Auto(BoyaAuto),
+}
+
+#[derive(Debug, Args)]
+pub struct BoyaAuto {
+    #[command(subcommand)]
+    pub command: BoyaAutoSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BoyaAutoSub {
+    /// Top up this semester's selected counts; 0 disables a category
+    Select(SelectionTargets),
+    /// Toggle continuous check-in/out, or submit one selected course by ID
+    Sign { id: Option<u32> },
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = true)]
+pub struct SelectionTargets {
+    #[arg(long)]
+    pub arts: Option<u32>,
+    #[arg(long)]
+    pub ethics: Option<u32>,
+    #[arg(long)]
+    pub labor: Option<u32>,
+    #[arg(long)]
+    pub safety: Option<u32>,
+    #[arg(long)]
+    pub other: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+pub struct Server {
+    #[command(subcommand)]
+    pub command: ServerSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerSub {
+    /// Show process status, policy settings and durable task outcomes
+    Status,
+    /// Start a detached background server
+    Start,
+    /// Stop the server, retaining pending tasks and settings
+    Off,
+    /// Run in the foreground (used internally by `start`)
+    #[command(hide = true)]
+    Run,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automation_arguments_and_existing_commands() {
+        for args in [
+            vec![
+                "buaa", "boya", "auto", "select", "--arts", "5", "--labor", "3",
+            ],
+            vec!["buaa", "boya", "auto", "sign"],
+            vec!["buaa", "boya", "auto", "sign", "123"],
+            vec!["buaa", "server", "start", "--disable-tls"],
+            vec!["buaa", "boya", "select", "123"],
+            vec!["buaa", "class", "auto"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["buaa", "boya", "auto", "select"],
+            vec!["buaa", "boya", "auto", "select", "--arts", "-1"],
+            vec!["buaa", "boya", "auto", "sign", "oops"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
 }
 
 #[derive(Parser, Debug)]

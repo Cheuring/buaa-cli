@@ -31,7 +31,17 @@ The same executable acts as client or daemon. Initial automation is Boya:
 - Created `codex/background-task-server` from clean upstream `main` (`7f0fb8a`).
 - Inspected CLI and pinned `buaa_api` source, including course/sign data and time
   conversion. Existing authentication files are under `target/release/`.
-- Implementation and verification are in progress.
+- Implemented a generic `Handler` boundary, loopback IPC, private per-instance
+  token, OS process lock, detached startup, persistent task state and shutdown.
+- Added Boya quota policies, periodic selected-course discovery, individual
+  check-in/out planning, remote enrollment confirmation and background CAPTCHA
+  errors. Original interactive commands still use their existing handlers.
+- Eight tests pass, including real loopback IPC with a mock handler, priority
+  preemption, interrupted-task recovery, retry backoff and state-file validation.
+  Loopback tests need network permission outside the desktop filesystem sandbox.
+- `cargo clippy --offline --all-targets -- -D warnings` passed before the added
+  IPC tests; final full checks, CLI process smoke tests and live read-only API
+  compatibility checks are still in progress.
 
 ## Working rules
 

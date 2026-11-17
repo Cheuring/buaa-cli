@@ -8,6 +8,9 @@ use std::error::Error;
 use std::path::PathBuf;
 
 pub fn get_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(dir) = env::var_os("BUAA_DATA_DIR") {
+        return Ok(PathBuf::from(dir).join(path));
+    }
     let file_path = env::current_exe()?
         .parent()
         .ok_or("Failed to get parent directory")?

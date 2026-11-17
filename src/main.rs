@@ -1,50 +1,37 @@
+mod auth;
 mod boya;
+mod boya_auto;
 mod captcha;
 mod class;
 mod command;
 mod exam;
+mod server;
 mod tes;
 mod utils;
 mod wifi;
 
-use buaa_api::ContextBuilder;
-use buaa_api::store::cookies::CookieStore;
-use buaa_api::store::cred::CredentialStore;
 use clap::Parser;
-
-use std::sync::Arc;
-
-use captcha::StdinSolver;
-use command::{Boya, BoyaSub, Class, ClassSub, Cli, Commands, Tes, TesSub, Wifi, WifiSub};
+use command::{
+    Boya, BoyaAutoSub, BoyaSub, Class, ClassSub, Cli, Commands, ServerSub, Tes, TesSub, Wifi,
+    WifiSub,
+};
 
 #[tokio::main]
 async fn main() {
-    let path = utils::get_path("./").unwrap();
-    let cookies_path = path.join("cookies.json");
-    let cookies = match CookieStore::from_file(cookies_path) {
-        Ok(c) => c,
-        Err(_) => {
-            eprintln!("[Warning]: Failed to read cookies.json, use default");
-            CookieStore::default()
-        }
-    };
-    let cred_path = path.join("cred.json");
-    let cred = match CredentialStore::from_file(cred_path) {
-        Ok(c) => c,
-        Err(_) => {
-            eprintln!("[Warning]: Failed to read cred.json, use default");
-            CredentialStore::default()
-        }
-    };
-
     let cli = Cli::parse();
-
-    let context = ContextBuilder::new()
-        .cookies(cookies)
-        .cred(cred)
-        .captcha(Arc::new(StdinSolver))
-        .tls(!cli.disable_tls)
-        .build();
+    let path = utils::get_path("./").unwrap();
+    if let Some(result) = background_command(&cli, &path).await {
+        if let Err(error) = result {
+            eprintln!("[Error]::<Server>: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(&path) {
+        eprintln!("[Error]: Failed to create data directory: {error}");
+        std::process::exit(1);
+    }
+    let context = auth::context(&path, cli.disable_tls, true);
 
     match cli.command {
         Commands::Login { username, password } => {
@@ -78,6 +65,7 @@ async fn main() {
             BoyaSub::Status => {
                 boya::status(&context).await;
             }
+            BoyaSub::Auto(_) => unreachable!("Handled before loading auth"),
         },
         Commands::Class(Class { command }) => match command {
             ClassSub::Auto => {
@@ -109,6 +97,7 @@ async fn main() {
                 wifi::logout(&context).await;
             }
         },
+        Commands::Server(_) => unreachable!("Handled before loading auth"),
     }
     match context.save_auth(&path) {
         Ok(_) => {}
@@ -116,4 +105,57 @@ async fn main() {
             eprintln!("[Error]: Failed to save auth data");
         }
     };
+}
+
+async fn background_command(cli: &Cli, path: &std::path::Path) -> Option<std::io::Result<()>> {
+    use server::protocol::Request;
+    let request = match &cli.command {
+        Commands::Server(server) => match server.command {
+            ServerSub::Start => return Some(server::start(path, cli.disable_tls).await),
+            ServerSub::Run => {
+                return Some(
+                    server::run(
+                        path,
+                        boya_auto::BoyaHandler {
+                            data_dir: path.to_path_buf(),
+                            disable_tls: cli.disable_tls,
+                        },
+                    )
+                    .await,
+                );
+            }
+            ServerSub::Status => Request::Status,
+            ServerSub::Off => Request::Stop,
+        },
+        Commands::Boya(Boya {
+            command: BoyaSub::Auto(auto),
+        }) => match &auto.command {
+            BoyaAutoSub::Select(targets) => {
+                let payload: serde_json::Map<String, serde_json::Value> = [
+                    ("arts", targets.arts),
+                    ("ethics", targets.ethics),
+                    ("labor", targets.labor),
+                    ("safety", targets.safety),
+                    ("other", targets.other),
+                ]
+                .into_iter()
+                .filter_map(|(name, count)| count.map(|n| (name.into(), n.into())))
+                .collect();
+                Request::Configure {
+                    namespace: "boya.auto.select".into(),
+                    payload: payload.into(),
+                }
+            }
+            BoyaAutoSub::Sign { id: None } => Request::Configure {
+                namespace: "boya.auto.sign".into(),
+                payload: serde_json::json!({}),
+            },
+            BoyaAutoSub::Sign { id: Some(id) } => Request::Submit {
+                kind: "boya.sign.plan".into(),
+                payload: serde_json::json!({"id": id}),
+            },
+        },
+        _ => return None,
+    };
+    Some(server::client(path, request).await)
 }

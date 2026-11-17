@@ -1,2 +1,6 @@
 /target
 Cargo.lock
+cookies.json
+cred.json
+captcha.png
+/server/
