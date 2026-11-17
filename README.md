@@ -39,6 +39,7 @@ Now throw it in the trash and try this tool
    ```sh
    git clone https://github.com/fontlos/buaa-cli
    cd buaa-cli
+   # Rust 1.89 or newer
    cargo build --release
    ```
 
@@ -85,6 +86,91 @@ buaa boya selected
 # Query statistics information
 buaa boya status
 ```
+
+## Background task server
+
+The same executable can run a local background server. Existing commands keep
+working directly; `boya auto` commands send work to the server and return immediately.
+
+```sh
+# Start a detached server (survives closing the terminal)
+buaa server start
+
+# Show process status, automation settings, tasks and recent errors
+buaa server status
+
+# Stop the server; retain settings and pending tasks for the next start
+buaa server off
+```
+
+The server listens only on the local loopback interface. Authentication files stay
+beside the executable, and server state/logs are in `server/` beside it. Start and
+stop are idempotent. Each data directory has at most one server. To use another
+directory, set `BUAA_DATA_DIR` for both the server and client commands; log in using
+that directory first. The directory must be writable.
+
+Tasks store absolute Unix timestamps. The scheduler reads the host wall clock at
+least every 200 ms while idle, checks it again before dispatch, and rechecks course
+windows before submitting an action. Host clock corrections and resume from sleep
+therefore update the schedule. Slow discovery queries yield to due actions.
+Network/login latency and another in-flight action can still delay an API request;
+this is not a hard real-time service. Keep the host awake and its system clock
+synchronized. On restart, overdue work runs only while its execution window is
+still open; missed signing windows expire.
+
+This starts a resident process, not an OS boot service. After a reboot or crash,
+run `buaa server start` again to resume persisted tasks. Interrupted external
+requests can be retried: enrollment is reconciled against the selected-course
+list, but exactly-once external effects are not guaranteed.
+
+### Boya automation
+
+```sh
+buaa server start
+
+# Top up THIS SEMESTER's selected totals to 5 arts and 3 labor courses
+# Already selected courses count toward the targets
+buaa boya auto select --arts 5 --labor 3
+
+# Also supported: --ethics, --safety, --other
+# Update only the supplied categories; retain the other configured targets
+buaa boya auto select --arts 6
+
+# Disable one category (does not drop courses already selected)
+buaa boya auto select --arts 0
+
+# Toggle continuous automatic check-in AND check-out
+buaa boya auto sign
+
+# Schedule check-in/out for one already selected self-service course
+buaa boya auto sign <ID>
+
+buaa server status
+```
+
+Automatic selection scans all available course pages and only enrolls courses with
+a non-empty `sign_config`. It waits for selection to open, checks semester counts
+before every enrollment, and verifies the selected list after submitting. Configured
+targets remain active, so newly available courses and later quota shortages are
+discovered on subsequent scans. Set each configured category to `0` to stop it.
+
+Continuous signing discovers all selected self-service courses every minute,
+including courses selected later. It schedules separate check-in and check-out
+tasks within their respective windows. Selection and signing are independent:
+enable automatic signing separately if you want newly enrolled courses signed.
+Turning continuous signing off cancels its pending work; explicit `<ID>` tasks
+remain scheduled. Single-course submissions are validated asynchronously; inspect
+`server status` for planning failures or expired windows.
+
+Network and authentication failures use bounded retry backoff. Windowed actions
+retry until their window closes; one-off planning stops after 10 failed attempts
+and can be resubmitted. If login needs a CAPTCHA, the server records an error
+instead of waiting on stdin. Run `buaa login` interactively using the same data
+directory; the next task attempt reloads the new credentials. If that option is
+needed for background work, stop the server and start it with
+`buaa --disable-tls server start`.
+
+For contributors, see [AGENTS.md](AGENTS.md) and [development notes](docs/DEVELOPMENT.md).
 
 ## Smart Classroom
 

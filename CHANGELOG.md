@@ -1,5 +1,20 @@
 # BUAA Cli: Powerful tool to Make BUAA Great Again
 
+## [Unreleased]
+
+- Feat
+  - Add a local resident task server with persistent wall-clock scheduling,
+    restart recovery, retry backoff, status reporting and detached startup.
+  - Add `boya auto select` to fill semester category targets using self-service
+    courses only, and `boya auto sign [ID]` for automatic check-in/out.
+  - Add `BUAA_DATA_DIR` for isolated authentication and server instances.
+- Fix
+  - Protect concurrent CLI/server authentication updates with short file locks,
+    atomic writes and stale-session checks.
+- Chore
+  - Document automation behavior and ongoing AI development context.
+  - Require Rust 1.89 or newer for portable OS file locks.
+
 ## [v0.5.0] - 2026-11-15
 
 - Feat

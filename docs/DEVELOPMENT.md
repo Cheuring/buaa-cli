@@ -46,8 +46,58 @@ The same executable acts as client or daemon. Initial automation is Boya:
 - Read-only live API check passed: queried 100 courses on page 1, 2 selected
   self-service courses and 2 unexpired sign windows. No real selection, drop,
   check-in or check-out was submitted. Credentials were only refreshed normally.
-- Default suite and strict Clippy passed. Final crash-recovery check, release
-  build, user documentation and fork push are in progress.
+- Default suite: 13 tests passed, plus one separately invoked read-only live test.
+  This includes a detached process killed with SIGKILL and restarted with its
+  tasks intact. Strict Clippy, formatting and optimized release build passed.
+- README, changelog and a three-platform CI check workflow are added. The final
+  release binary passed isolated start/status/configure/off smoke tests, and the
+  original `boya selected` command passed using the existing account (read-only).
+- Implementation is complete; fork push and remote CI verification are pending.
+
+## Extension points and operational details
+
+- `src/server/task.rs`: durable task model, priority, expiration, deduplication
+  and bounded wall-clock waits. It has no dependency on Boya types or semantics.
+- `src/server/mod.rs`: single-owner state loop and the `Handler` interface.
+  `configure`/`submit` validate client operations; `execute` returns new tasks or
+  a recurrence delay. Future domains can be composed in an application handler.
+- A single action runs at a time, serializing quota mutations. Read-only discovery
+  is marked preemptible and low priority; check-in/out has higher priority than
+  selection. Tasks have a 45-second timeout. Network latency can delay actions;
+  this is a wall-clock scheduler, not a hard real-time guarantee.
+- `src/boya_auto.rs` owns policy settings, one-minute discovery and course windows;
+  `src/boya_auto/backend.rs` adapts the pinned university API and allows mock tests.
+- Enrollment handlers verify the selected list after mutation because the pinned
+  upstream `select_course` does not parse its business-status response. Each retry
+  reconciles remote selections before submitting again.
+- Selection targets are persistent and update only supplied categories; `0`
+  disables a category. They are applied to the server-reported current semester.
+  Signing is independent; toggling off removes automatic pending tasks and keeps
+  explicitly submitted course tasks. Windowed actions retry until expiry.
+- State version is 1. Unsupported/corrupt state fails startup without resetting
+  it. State is persisted before acknowledging configuration or dispatching work.
+  Outcomes for active windows are retained for deduplication; old outcomes are
+  compacted. Interrupted external effects have at-least-once retry semantics.
+- The service survives terminal closure but does not install a boot service or
+  keep a sleeping host awake. Use `server start` after reboot/crash. Tests stop
+  their instances; no real-account automation policy is enabled during validation.
+
+## Verification commands
+
+```sh
+cargo fmt --check
+cargo test --offline
+cargo clippy --offline --all-targets -- -D warnings
+cargo build --offline --release
+
+# Optional: university queries only; no enrollment or signing.
+BUAA_LIVE_AUTH_DIR="$PWD/target/release" cargo test --offline \
+  live_read_only_compatibility -- --ignored --nocapture
+```
+
+The live test refreshes authentication normally but never prints credentials.
+Cross-platform CI runs tests and Clippy on macOS, Linux and Windows; results must
+be checked before claiming those additional platforms are verified.
 
 ## Working rules
 
