@@ -55,6 +55,13 @@ The same executable acts as client or daemon. Initial automation is Boya:
 - The branch is pushed to `self_fork` (`Cheuring/buaa-cli`); remote CI verification
   is in progress. A final policy reconciliation prevents an in-flight enrollment
   using older settings from adding sign tasks after automatic signing is disabled.
+- Linux and macOS CI passed. Windows ran unusually long; std process source and
+  [Windows handle inheritance documentation](https://learn.microsoft.com/en-us/windows/win32/sysinfo/handle-inheritance)
+  show that redirected stdio does not exclude other inheritable handles. Windows
+  startup now temporarily disables inheritance on the CLI's original stdio handles
+  while spawning the daemon, preventing captured-output pipes from staying open.
+  CLI tests have a 30-second watchdog; CI jobs have a 15-minute limit. Reverification
+  is in progress; do not claim Windows is verified until the new run passes.
 
 ## Extension points and operational details
 

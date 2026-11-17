@@ -5,6 +5,8 @@ pub mod storage;
 pub mod task;
 #[cfg(test)]
 mod tests;
+#[cfg(windows)]
+mod windows;
 
 use protocol::{Endpoint, Envelope, Request, Response};
 use std::fs::{self, OpenOptions};
@@ -131,7 +133,12 @@ pub async fn start(data_dir: &Path, disable_tls: bool) -> io::Result<()> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x00000008 | 0x00000200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     }
-    let mut child = command.spawn()?;
+    #[cfg(windows)]
+    let inherited_stdio = windows::InheritanceGuard::disable_stdio()?;
+    let child = command.spawn();
+    #[cfg(windows)]
+    drop(inherited_stdio);
+    let mut child = child?;
     for _ in 0..100 {
         if let Ok(response) = protocol::call(&dir, Request::Status).await
             && response.ok
@@ -363,7 +370,10 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("Signal handler unavailable: {error}; use `buaa server off`");
+            std::future::pending::<()>().await;
+        }
     }
 }
 

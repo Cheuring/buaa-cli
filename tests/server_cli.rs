@@ -15,12 +15,22 @@ impl Instance {
         Self(path)
     }
     fn command(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_buaa"))
-            .env("BUAA_DATA_DIR", &self.0)
-            .args(args)
-            .output()
+        let directory = self.0.clone();
+        let arguments: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let output = Command::new(env!("CARGO_BIN_EXE_buaa"))
+                .env("BUAA_DATA_DIR", directory)
+                .args(arguments)
+                .output();
+            let _ = send.send(output);
+        });
+        receive
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("CLI process or captured output did not finish within 30 seconds")
             .unwrap()
     }
+
     fn ok(&self, args: &[&str]) -> String {
         let output = self.command(args);
         assert!(
