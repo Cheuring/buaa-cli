@@ -1,6 +1,8 @@
 //! Boya policies and handlers; scheduler/transport contain no course logic.
 
 mod backend;
+#[cfg(test)]
+mod live_soak;
 use backend::Backend;
 use buaa_api::api::boya::{Category, Course, SignConfig};
 use serde::{Deserialize, Serialize};

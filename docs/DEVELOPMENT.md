@@ -89,8 +89,16 @@ The same executable acts as client or daemon. Initial automation is Boya:
   the successful return of an API call.
 - Local verification: formatting and strict Clippy passed. The offline test suite
   passed 15 tests, including log rotation, isolated daemon lifecycle and the
-  log sequence for a failed attempt with a scheduled retry. The live test is
-  ignored by default and was not used for this follow-up.
+  log sequence for a failed attempt with a scheduled retry. Live tests are
+  ignored by default.
+- Real-account soak against runtime commit `9cd9b75` on 2026-11-18, 12:51–14:51
+  (UTC+8): 7,200 seconds, four successful rounds for each discovery path, 36
+  successful Boya API calls, and 25 successful local IPC health checks. All rounds
+  scheduled their next run 1,800,000 ms after completion. Enrollment discovery
+  took 19–27 s per scan; sign discovery found two active or upcoming windows
+  each round. The isolated daemon shut down cleanly. The test did not write to
+  the existing credential files or send enrollment, check-in or check-out
+  requests, so live mutations remain outside this validation.
 
 ## Extension points and operational details
 
@@ -133,9 +141,19 @@ cargo build --offline --release
 # Optional: university queries only; no enrollment or signing.
 BUAA_LIVE_AUTH_DIR="$PWD/target/release" cargo test --offline \
   live_read_only_compatibility -- --ignored --nocapture
+
+# Optional: two-hour real-account soak with the real scheduler, read-only
+# Boya discovery, and a new directory for state and diagnostic logs.
+BUAA_LIVE_AUTH_DIR="$PWD/target/release" \
+BUAA_SOAK_DATA_DIR="$PWD/target/boya-soak" cargo test --offline \
+  live_read_only_daemon_soak -- --ignored --nocapture
 ```
 
-The live test refreshes authentication normally but never prints credentials.
+The short live test refreshes authentication normally but never prints
+credentials. The soak keeps any refreshed session in memory, prevents mutations
+at the backend boundary, and discards the planned course actions. Use a new
+`BUAA_SOAK_DATA_DIR` for each run; the test shuts down its daemon after two hours
+and leaves its log under that directory's `server/`.
 Cross-platform CI runs tests and Clippy on macOS, Linux and Windows; results must
 be checked before claiming those additional platforms are verified.
 
