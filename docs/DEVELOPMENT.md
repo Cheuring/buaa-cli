@@ -154,6 +154,24 @@ The same executable acts as client or daemon. Initial automation is Boya:
   keep a sleeping host awake. Use `server start` after reboot/crash. Tests stop
   their instances; no real-account automation policy is enabled during validation.
 
+## WSL deployment
+
+- Ubuntu 24.04 on WSL 2 (x86-64) was verified with runtime commit `034b978`,
+  Rust 1.94.1, and a locked release build. Build inside the distribution; this
+  deployment does not require a native Windows executable. An isolated
+  start/status/off smoke passed before using the real data directory.
+- Install the binary and its data under a private Linux directory, for example
+  `~/.local/share/buaa/`. Transfer `cred.json`, `cookies.json`,
+  `server/notify.json`, and optionally a `server/state.json` snapshot only over
+  authenticated SSH; keep these files at mode 0600. Never copy endpoint or lock
+  files. If both instances will run, omit the old signing jitter seed so the
+  new instance generates an independent one on first start.
+- The WSL daemon was started with the same Boya policy and Bark configuration.
+  A new SSH connection confirmed it was still running, and its first real
+  signing discovery planned both windows. The two instances do not share
+  completion records or quotas; running both can duplicate writes or pushes.
+  After Windows restarts or WSL shuts down, run `buaa server start` again.
+
 ## Verification commands
 
 ```sh
