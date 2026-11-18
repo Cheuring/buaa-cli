@@ -34,9 +34,9 @@ impl Handler for MockHandler {
     }
 }
 
-struct TestDir(PathBuf);
+pub(super) struct TestDir(pub(super) PathBuf);
 impl TestDir {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut random = [0u8; 8];
         getrandom::fill(&mut random).unwrap();
         let path =

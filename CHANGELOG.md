@@ -9,6 +9,8 @@
     courses only, and `boya auto sign [ID]` for automatic check-in/out. Both
     discover courses every 30 minutes after an initial scan.
   - Add `BUAA_DATA_DIR` for isolated authentication and server instances.
+  - Record task attempts, API calls, confirmed Boya results and scheduled
+    retries in a rotating server log.
 - Fix
   - Protect concurrent CLI/server authentication updates with short file locks,
     atomic writes and stale-session checks.

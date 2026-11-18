@@ -124,16 +124,16 @@ impl State {
         });
     }
 
-    pub fn expire(&mut self, now: i64) -> bool {
-        let mut changed = false;
+    pub fn expire(&mut self, now: i64) -> Vec<&Task> {
+        let mut expired = Vec::new();
         for task in &mut self.tasks {
             if task.status == Status::Pending && task.expires_ms.is_some_and(|end| now >= end) {
                 task.status = Status::Expired;
                 task.last_error = Some("Execution window has passed".into());
-                changed = true;
+                expired.push(&*task);
             }
         }
-        changed
+        expired
     }
 
     pub fn next_due(&self, now: i64) -> Option<usize> {
@@ -208,7 +208,7 @@ mod tests {
         // A clock moving backwards never causes early dispatch.
         assert!(state.next_due(8_000).is_none());
         assert_eq!(state.wait_duration(0), Duration::from_millis(200));
-        assert!(state.expire(12_000));
+        assert_eq!(state.expire(12_000).len(), 1);
         assert_eq!(state.tasks[0].status, Status::Expired);
     }
 

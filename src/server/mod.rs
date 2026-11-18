@@ -1,5 +1,6 @@
 //! Local daemon infrastructure. Domain behavior is supplied by a Handler.
 
+pub(crate) mod logging;
 pub mod protocol;
 pub mod storage;
 pub mod task;
@@ -8,13 +9,16 @@ mod tests;
 #[cfg(windows)]
 mod windows;
 
+use logging::{Log, open_append};
 use protocol::{Endpoint, Envelope, Request, Response};
-use std::fs::{self, OpenOptions};
+use serde_json::json;
+use std::fs;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Instant;
 use task::{Outcome, State, Status, Task, now_ms};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -100,17 +104,16 @@ pub async fn start(data_dir: &Path, disable_tls: bool) -> io::Result<()> {
     drop(storage::lock(&dir).map_err(|_| {
         io::Error::other("Server is already starting or running; inspect server.log")
     })?);
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("server.log"))?;
+    // Reserve stderr for failures outside the event logger (such as startup
+    // errors and panics). Never hold server.log open in a detached stdio handle.
+    let diagnostics = open_append(&dir.join("server.stderr.log"))?;
     let mut command = Command::new(std::env::current_exe()?);
     command
         .env("BUAA_DATA_DIR", data_dir)
         .args(["server", "run"])
         .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
+        .stdout(Stdio::null())
+        .stderr(diagnostics);
     if disable_tls {
         command.arg("--disable-tls");
     }
@@ -149,7 +152,7 @@ pub async fn start(data_dir: &Path, disable_tls: bool) -> io::Result<()> {
         if let Some(status) = child.try_wait()? {
             return Err(io::Error::other(format!(
                 "Server exited ({status}); inspect {}",
-                dir.join("server.log").display()
+                dir.join("server.stderr.log").display()
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -158,7 +161,7 @@ pub async fn start(data_dir: &Path, disable_tls: bool) -> io::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
     Err(io::Error::other(
-        "Server startup timed out; inspect server.log",
+        "Server startup timed out; inspect server.log and server.stderr.log",
     ))
 }
 
@@ -169,6 +172,7 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
     let dir = directory(data_dir);
     storage::private_dir(&dir)?;
     let _lock = storage::lock(&dir)?;
+    let log = Log::new(dir.join("server.log"));
     let mut state = storage::load_state(&dir)?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mut random = [0u8; 32];
@@ -182,30 +186,45 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
     storage::write_json(&dir.join("state.json"), &state)?;
     storage::write_json(&dir.join("endpoint.json"), &endpoint)?;
     let _endpoint_guard = EndpointGuard(dir.join("endpoint.json"));
-    println!("[{}] Server started (PID {})", now_ms(), endpoint.pid);
+    log.event("info", "server.started", json!({"pid": endpoint.pid}));
     let (tx, mut rx) = mpsc::channel::<Incoming>(32);
     let listener_task = tokio::spawn(accept(listener, endpoint.token, tx));
     let handler = Arc::new(handler);
-    let mut active: Option<(Task, Worker)> = None;
+    let mut active: Option<(Task, Worker, Instant)> = None;
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
-        if state.expire(now_ms()) {
+        let expired = state.expire(now_ms());
+        if !expired.is_empty() {
+            for task in expired {
+                log.task(
+                    "warn",
+                    "task.expired",
+                    task,
+                    json!({"expires_ms": task.expires_ms}),
+                );
+            }
             state.compact(now_ms());
             storage::write_json(&dir.join("state.json"), &state)?;
         }
-        if let Some((task, _)) = &active
+        if let Some((task, _, _)) = &active
             && task.preemptible
             && state
                 .next_due(now_ms())
                 .is_some_and(|index| state.tasks[index].priority > task.priority)
         {
-            let (task, worker) = active.take().unwrap();
+            let (task, worker, _) = active.take().unwrap();
             worker.abort();
             let _ = worker.await;
             if let Some(interrupted) = state.tasks.iter_mut().find(|t| t.key == task.key) {
                 interrupted.status = Status::Pending;
                 interrupted.due_ms = now_ms() + 1_000;
+                log.task(
+                    "info",
+                    "task.preempted",
+                    &task,
+                    json!({"next_due_ms": interrupted.due_ms}),
+                );
             }
         }
         if active.is_none()
@@ -218,12 +237,20 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
             let settings = state.settings.clone();
             let executor = handler.clone();
             let work = task.clone();
-            let worker = tokio::spawn(async move {
+            log.task(
+                "info",
+                "task.started",
+                &task,
+                json!({
+                    "due_ms": task.due_ms, "expires_ms": task.expires_ms
+                }),
+            );
+            let worker = tokio::spawn(log.in_task(&task, async move {
                 timeout(Duration::from_secs(45), executor.execute(work, settings))
                     .await
                     .unwrap_or_else(|_| Err("Task timed out; will reconcile before retry".into()))
-            });
-            active = Some((task, worker));
+            }));
+            active = Some((task, worker, Instant::now()));
         }
         let wait = if active.is_some() {
             Duration::from_millis(200)
@@ -234,6 +261,12 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
             _ = &mut shutdown => break,
             Some((request, reply)) = rx.recv() => {
                 let stop = matches!(request, Request::Stop);
+                let operation = match &request {
+                    Request::Status => None,
+                    Request::Stop => Some("stop"),
+                    Request::Configure { .. } => Some("configure"),
+                    Request::Submit { .. } => Some("submit"),
+                };
                 let mut next = state.clone();
                 let response = match request {
                     Request::Status => Response { ok: true, message: format!("Running (PID {})", std::process::id()), state: Some(state.clone()) },
@@ -248,50 +281,78 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
                 if response.ok {
                     storage::write_json(&dir.join("state.json"), &next)?;
                     state = next;
-                    if let Some((task, _)) = &active
+                    if let Some((task, _, _)) = &active
                         && !state.tasks.iter().any(|t| t.key == task.key && t.status == Status::Running) {
-                        let (_, worker) = active.take().unwrap();
+                        let (task, worker, _) = active.take().unwrap();
                         worker.abort();
                         let _ = worker.await;
+                        log.task("info", "task.cancelled", &task, json!({"reason": "configuration_or_submission"}));
                     }
+                }
+                if let Some(operation) = operation {
+                    log.event(if response.ok { "info" } else { "warn" }, "ipc.command",
+                        json!({"operation": operation, "accepted": response.ok}));
                 }
                 if stop {
                     // Await current cancellation and release endpoint/lock before
                     // acknowledging, so a following `start` cannot see a ghost.
-                    if let Some((_, worker)) = active.take() { worker.abort(); let _ = worker.await; }
+                    if let Some((task, worker, _)) = active.take() {
+                        worker.abort();
+                        let _ = worker.await;
+                        log.task("info", "task.interrupted", &task, json!({"reason": "shutdown"}));
+                    }
                     state.recover();
                     storage::write_json(&dir.join("state.json"), &state)?;
                     listener_task.abort();
+                    log.event("info", "server.stopped", json!({"reason": "command"}));
                     drop(_endpoint_guard);
                     drop(_lock);
                     let _ = reply.send(response);
-                    println!("[{}] Server stopped", now_ms());
                     return Ok(());
                 }
                 let _ = reply.send(response);
             },
             result = async { (&mut active.as_mut().unwrap().1).await }, if active.is_some() => {
-                let (task, _) = active.take().unwrap();
-                let result = result.unwrap_or_else(|error| Err(format!("Task worker failed: {error}")));
+                let (task, _, started) = active.take().unwrap();
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let result = result.unwrap_or_else(|error| {
+                    let reason = if error.is_panic() { "panicked" } else { "cancelled" };
+                    Err(format!("Task worker {reason}"))
+                });
+                let planned_tasks = result.as_ref().ok().map(|outcome| outcome.tasks.len());
                 finish(&mut state, &task.key, result, now_ms());
+                if let Some(completed) = state.tasks.iter().find(|t| t.key == task.key) {
+                    let next_due_ms = (completed.status == Status::Pending).then_some(completed.due_ms);
+                    log.task(
+                        if completed.last_error.is_some() { "warn" } else { "info" },
+                        "task.finished",
+                        &task,
+                        json!({"status": completed.status, "elapsed_ms": elapsed_ms,
+                            "next_due_ms": next_due_ms, "error": completed.last_error,
+                            "planned_tasks": planned_tasks}),
+                    );
+                }
                 handler.reconcile(&mut state);
                 state.compact(now_ms());
-                if let Some(completed) = state.tasks.iter().find(|t| t.key == task.key) {
-                    println!("[{}] {}: {:?}", now_ms(), completed.key, completed.status);
-                }
                 storage::write_json(&dir.join("state.json"), &state)?;
             },
             _ = tokio::time::sleep(wait) => {},
         }
     }
-    if let Some((_, worker)) = active {
+    if let Some((task, worker, _)) = active {
         worker.abort();
         let _ = worker.await;
+        log.task(
+            "info",
+            "task.interrupted",
+            &task,
+            json!({"reason": "shutdown"}),
+        );
     }
     state.recover();
     storage::write_json(&dir.join("state.json"), &state)?;
     listener_task.abort();
-    println!("[{}] Server stopped", now_ms());
+    log.event("info", "server.stopped", json!({"reason": "signal"}));
     Ok(())
 }
 
@@ -314,7 +375,6 @@ fn finish(state: &mut State, key: &str, result: Result<Outcome, String>, now: i6
             }
         }
         Err(error) => {
-            eprintln!("[{now}] {key}: {error}");
             task.last_error = Some(error);
             let delay = (1_000_i64 << task.attempts.min(6)).min(60_000);
             task.due_ms = now + delay;

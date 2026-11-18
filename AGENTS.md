@@ -11,6 +11,8 @@ Read `docs/DEVELOPMENT.md` for current scope, decisions, verification and next s
   Never implement a long-lived schedule with one relative sleep.
 - Do not print, commit or copy authentication material into reports. Auth files
   live beside the executable by default. Use an isolated `BUAA_DATA_DIR` in tests.
+- Log safe request metadata and typed API errors. Keep raw payloads, responses,
+  credentials and signing coordinates out of daemon logs.
 - Background execution must never read stdin for a CAPTCHA. Report an actionable
   authentication error and retry later instead.
 - Use `cargo fmt --check`, `cargo test --offline`, and `cargo clippy --offline

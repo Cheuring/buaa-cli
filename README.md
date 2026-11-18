@@ -109,6 +109,14 @@ stop are idempotent. Each data directory has at most one server. To use another
 directory, set `BUAA_DATA_DIR` for both the server and client commands; log in using
 that directory first. The directory must be writable.
 
+`buaa server status` shows the log path. `server/server.log` records JSON Lines
+with Unix timestamps in milliseconds. Use the task key and attempt number to
+follow dispatch, API calls, Boya results and retries. The log rotates at 2 MiB,
+keeping one previous file (`server.log.1`). Startup failures and other process
+diagnostics go to `server/server.stderr.log`. Logs record operation names and
+safe error categories without storing credentials, coordinates or raw responses.
+Logs from before the upgrade may contain older plain-text lines until rotation.
+
 Tasks store absolute Unix timestamps. The scheduler reads the host wall clock at
 least every 200 ms while idle, checks it again before dispatch, and rechecks course
 windows before submitting an action. Host clock corrections and resume from sleep

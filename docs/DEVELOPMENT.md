@@ -73,6 +73,25 @@ The same executable acts as client or daemon. Initial automation is Boya:
   and no real-account automatic policy was enabled during testing. The final
   documentation-only commit uses `[skip ci]`; the code validation SHA is above.
 
+## Follow-up: discovery interval and diagnostics
+
+- Both Boya discovery tasks recur 30 minutes after successful completion; initial
+  discovery is immediate. Upgrading preserves any next scan time already stored
+  in state. The next successful scan schedules the new interval.
+- `src/server/logging.rs` writes JSON Lines to `server/server.log` during execution
+  (2 MiB per file, one retained previous file). Each task attempt carries its
+  task key through scheduling, API calls and domain results. Process stderr,
+  including startup failures, is captured separately in `server.stderr.log`.
+- Backend request logs use an operation name, course ID or page when applicable,
+  elapsed time and a typed error category. Do not log full API errors: their
+  message or nested source may include authentication data or raw responses.
+  Enrollment confirmation and check-in/out acceptance are separate events from
+  the successful return of an API call.
+- Local verification: formatting and strict Clippy passed. The offline test suite
+  passed 15 tests, including log rotation, isolated daemon lifecycle and the
+  log sequence for a failed attempt with a scheduled retry. The live test is
+  ignored by default and was not used for this follow-up.
+
 ## Extension points and operational details
 
 - `src/server/task.rs`: durable task model, priority, expiration, deduplication

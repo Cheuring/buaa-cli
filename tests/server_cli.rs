@@ -84,6 +84,64 @@ fn cli_lifecycle_and_durable_configuration() {
     assert!(!instance.0.join("cookies.json").exists());
 }
 
+#[test]
+fn task_log_correlates_failed_attempt_with_scheduled_retry() {
+    use std::time::{Duration, Instant};
+
+    let instance = Instance::new();
+    instance.ok(&["server", "start"]);
+    // No credentials: planning stops at local auth loading, before any API call.
+    instance.ok(&["boya", "auto", "sign", "123"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let path = instance.0.join("server/server.log");
+    loop {
+        let contents = fs::read_to_string(&path).unwrap();
+        let events: Vec<Value> = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let first_attempt = |event: &&Value| {
+            event["task"]["key"] == "boya.sign.plan:123" && event["task"]["attempt"] == 1
+        };
+        if let Some(completed) = events
+            .iter()
+            .filter(first_attempt)
+            .find(|event| event["event"] == "task.finished")
+        {
+            let started = events
+                .iter()
+                .filter(first_attempt)
+                .find(|event| event["event"] == "task.started")
+                .unwrap();
+            assert!(
+                started["details"]["due_ms"].as_i64().unwrap()
+                    <= started["timestamp_ms"].as_i64().unwrap()
+            );
+            assert_eq!(completed["level"], "warn");
+            assert_eq!(completed["details"]["status"], "pending");
+            assert!(
+                completed["details"]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("buaa login")
+            );
+            assert!(
+                completed["details"]["next_due_ms"].as_i64().unwrap()
+                    > completed["timestamp_ms"].as_i64().unwrap()
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| event["event"] == "boya.request.started")
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "Missing task events: {contents}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(instance.ok(&["server", "status"]).contains("Running"));
+}
+
 #[cfg(unix)]
 #[test]
 fn process_crash_recovers_pending_tasks() {

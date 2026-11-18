@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::server::Handler;
+use crate::server::logging::task_event;
 use crate::server::task::{Outcome, State, Task, now_ms};
 
 const SELECT: &str = "boya.auto.select";
@@ -271,9 +272,21 @@ async fn select_one(
     // Reconcile after uncertain results/restarts and before EVERY enrollment.
     // This serial execution prevents multiple candidates overfilling a target.
     if course.selected || chosen.iter().any(|c| c.id == course.id) {
+        task_event(
+            "info",
+            "boya.enrollment.result",
+            json!({"course_id": course.id, "outcome": "already_selected"}),
+        );
         return Ok(Outcome::default());
     }
     if !selectable(&course, &config.targets, &counts(&chosen), now_ms()) {
+        task_event(
+            "info",
+            "boya.enrollment.result",
+            json!({
+                "course_id": course.id, "outcome": "no_longer_eligible"
+            }),
+        );
         return Ok(Outcome::default());
     }
     let due = course.schedule.select_start.timestamp() * 1000;
@@ -286,7 +299,13 @@ async fn select_one(
     context.enroll(course.id).await?;
     // select_course's upstream implementation does not parse its status body.
     // Verify remote enrollment rather than interpreting an HTTP response as success.
-    if !context.selected().await?.iter().any(|c| c.id == course.id) {
+    let confirmed = context.selected().await?.iter().any(|c| c.id == course.id);
+    task_event(
+        if confirmed { "info" } else { "warn" },
+        "boya.enrollment.result",
+        json!({"course_id": course.id, "outcome": if confirmed { "confirmed" } else { "unconfirmed" }}),
+    );
+    if !confirmed {
         return Err("Enrollment was not confirmed by the selected course list".into());
     }
     let tasks = if config.auto_sign {
@@ -390,6 +409,12 @@ async fn sign_one(context: &impl Backend, task: &Task) -> Result<Outcome, String
     let result = context
         .sign(payload.id, &config.coordinate, payload.checkout)
         .await?;
+    task_event(
+        if result.is_ok { "info" } else { "warn" },
+        "boya.sign.result",
+        json!({"course_id": payload.id, "phase": if payload.checkout { "checkout" } else { "checkin" },
+            "accepted": result.is_ok}),
+    );
     if !result.is_ok {
         return Err("Boya rejected the sign location/result".into());
     }
