@@ -168,7 +168,12 @@ course actions still run at their own due times.
 
 Continuous signing discovers all selected self-service courses,
 including courses selected later. It schedules separate check-in and check-out
-tasks within their respective windows. Selection and signing are independent:
+tasks. For each task, take the later of the window opening and five minutes
+before the class starts (check-in) or ends (check-out), then add a random
+offset of less than 30 seconds, kept within the window. If that base time
+does not fit in the window, the task is skipped. An open window whose planned
+time has already passed is handled as soon as possible. The legacy
+`boya check <ID>` keeps its original timing. Selection and signing are independent:
 enable automatic signing separately if you want newly enrolled courses signed.
 Turning continuous signing off cancels its pending work; explicit `<ID>` tasks
 remain scheduled. Single-course submissions are validated asynchronously; inspect

@@ -60,7 +60,7 @@ impl Handler for ReadOnlyHandler {
                 )
                 .await?
             }
-            "boya.auto.sign.discover" => sign_discover(&self.0).await?,
+            "boya.auto.sign.discover" => sign_discover(&self.0, 0).await?,
             _ => return Err("Refusing to execute a course action in a read-only test".into()),
         };
         task_event(

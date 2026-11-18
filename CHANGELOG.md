@@ -11,6 +11,8 @@
   - Add `BUAA_DATA_DIR` for isolated authentication and server instances.
   - Record task attempts, API calls, confirmed Boya results and scheduled
     retries in a rotating server log.
+  - Schedule background signing about five minutes before class starts or
+    ends, constrained by the school's window, with up to 30 seconds of jitter.
 - Fix
   - Protect concurrent CLI/server authentication updates with short file locks,
     atomic writes and stale-session checks.

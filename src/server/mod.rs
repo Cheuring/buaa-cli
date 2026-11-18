@@ -26,6 +26,11 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 pub trait Handler: Send + Sync + 'static {
+    /// Prepare persisted domain state before dispatching any recovered tasks.
+    fn prepare(&self, _state: &mut State) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Revalidate newly produced work against settings changed during execution.
     fn reconcile(&self, _state: &mut State) {}
     fn configure(
@@ -174,6 +179,7 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
     let _lock = storage::lock(&dir)?;
     let log = Log::new(dir.join("server.log"));
     let mut state = storage::load_state(&dir)?;
+    handler.prepare(&mut state)?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let mut random = [0u8; 32];
     getrandom::fill(&mut random).map_err(|error| io::Error::other(error.to_string()))?;

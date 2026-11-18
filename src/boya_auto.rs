@@ -8,6 +8,8 @@ use buaa_api::api::boya::{Category, Course, SignConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io;
 use std::path::PathBuf;
 
 use crate::server::Handler;
@@ -17,6 +19,9 @@ use crate::server::task::{Outcome, State, Task, now_ms};
 const SELECT: &str = "boya.auto.select";
 const SIGN: &str = "boya.auto.sign";
 const DISCOVER_INTERVAL: i64 = 30 * 60 * 1_000;
+const SIGN_LEAD_MS: i64 = 5 * 60 * 1_000;
+const SIGN_JITTER_MS: i64 = 30 * 1_000;
+const SIGN_JITTER_SEED: &str = "boya.sign_jitter_seed";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +30,8 @@ pub struct Policy {
     pub targets: BTreeMap<String, u32>,
     #[serde(default)]
     pub auto_sign: bool,
+    #[serde(skip)]
+    sign_jitter_seed: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -41,8 +48,11 @@ pub struct BoyaHandler {
 }
 
 fn policy(settings: &Value) -> Result<Policy, String> {
-    serde_json::from_value(settings.get("boya").cloned().unwrap_or_else(|| json!({})))
-        .map_err(|e| e.to_string())
+    let mut config: Policy =
+        serde_json::from_value(settings.get("boya").cloned().unwrap_or_else(|| json!({})))
+            .map_err(|e| e.to_string())?;
+    config.sign_jitter_seed = settings.get(SIGN_JITTER_SEED).and_then(Value::as_u64);
+    Ok(config)
 }
 
 fn category_key(category: Category) -> &'static str {
@@ -70,6 +80,21 @@ fn discover(group: &str) -> Task {
 }
 
 impl Handler for BoyaHandler {
+    fn prepare(&self, state: &mut State) -> io::Result<()> {
+        let config = policy(&state.settings).map_err(io::Error::other)?;
+        if config.sign_jitter_seed.is_none() {
+            let mut seed = [0; 8];
+            getrandom::fill(&mut seed).map_err(|error| io::Error::other(error.to_string()))?;
+            state.settings[SIGN_JITTER_SEED] = json!(u64::from_le_bytes(seed));
+            // On upgrade, let discovery refresh pending automatic tasks in place.
+            // Every task also checks the new timing rule at execution.
+            if config.auto_sign {
+                state.enqueue(discover(SIGN));
+            }
+        }
+        Ok(())
+    }
+
     fn reconcile(&self, state: &mut State) {
         // An enrollment can finish after automatic signing was switched off.
         // Its snapshot must not reintroduce work from the disabled policy.
@@ -164,25 +189,26 @@ impl Handler for BoyaHandler {
 }
 
 async fn execute(context: &impl Backend, task: &Task, config: Policy) -> Result<Outcome, String> {
+    let seed = config.sign_jitter_seed.unwrap_or_default();
     match task.kind.as_str() {
         "boya.auto.select.discover" => select_plan(context, &config).await,
-        "boya.auto.sign.discover" => sign_discover(context).await,
+        "boya.auto.sign.discover" => sign_discover(context, seed).await,
         "boya.select" => select_one(context, task, &config).await,
         "boya.sign.plan" => {
             let payload: CourseTask =
                 serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
             let course = context.course(payload.id).await?;
             ensure_selected(context, &course).await?;
-            let tasks = sign_tasks(&course, None, now_ms())?;
+            let tasks = sign_tasks(&course, None, now_ms(), seed)?;
             if tasks.is_empty() {
-                return Err("All check-in/out windows have passed".into());
+                return Err("No remaining usable check-in/out windows".into());
             }
             Ok(Outcome {
                 tasks,
                 ..Outcome::default()
             })
         }
-        "boya.sign" => sign_one(context, task).await,
+        "boya.sign" => sign_one(context, task, seed).await,
         _ => Err(format!("Unknown task kind: {}", task.kind)),
     }
 }
@@ -311,7 +337,12 @@ async fn select_one(
         return Err("Enrollment was not confirmed by the selected course list".into());
     }
     let tasks = if config.auto_sign {
-        sign_tasks(&course, Some(SIGN), now_ms())?
+        sign_tasks(
+            &course,
+            Some(SIGN),
+            now_ms(),
+            config.sign_jitter_seed.unwrap_or_default(),
+        )?
     } else {
         Vec::new()
     };
@@ -329,24 +360,35 @@ async fn ensure_selected(context: &impl Backend, course: &Course) -> Result<(), 
     }
 }
 
-fn sign_tasks(course: &Course, group: Option<&str>, now: i64) -> Result<Vec<Task>, String> {
+fn sign_tasks(
+    course: &Course,
+    group: Option<&str>,
+    now: i64,
+    seed: u64,
+) -> Result<Vec<Task>, String> {
     let config = course
         .sign_config
         .as_ref()
         .ok_or("Course has no self-service sign_config")?;
     let mut tasks = Vec::new();
-    for (checkout, start, end) in [
-        (false, config.checkin_start, config.checkin_end),
-        (true, config.checkout_start, config.checkout_end),
-    ] {
-        let due = start.timestamp() * 1000;
-        let expiry = end.timestamp() * 1000;
-        if expiry <= now || due >= expiry {
+    for checkout in [false, true] {
+        let (start, expiry) = sign_window(config, checkout);
+        if expiry <= now {
             continue;
         }
         let phase = if checkout { "out" } else { "in" };
+        let Some(due) = planned_sign_ms(course, checkout, start, expiry, seed) else {
+            task_event(
+                "warn",
+                "boya.sign.no_usable_time",
+                json!({
+                    "course_id": course.id, "phase": phase, "window_end_ms": expiry
+                }),
+            );
+            continue;
+        };
         let mut task = Task::new(
-            format!("boya.sign:{}:{phase}:{due}", course.id),
+            format!("boya.sign:{}:{phase}:{start}", course.id),
             "boya.sign",
             json!(CourseTask {
                 id: course.id,
@@ -363,7 +405,7 @@ fn sign_tasks(course: &Course, group: Option<&str>, now: i64) -> Result<Vec<Task
     Ok(tasks)
 }
 
-async fn sign_discover(context: &impl Backend) -> Result<Outcome, String> {
+async fn sign_discover(context: &impl Backend, seed: u64) -> Result<Outcome, String> {
     let mut tasks = Vec::new();
     for chosen in context.selected().await? {
         if chosen.schedule.course_end.timestamp() * 1000 + 86_400_000 < now_ms() {
@@ -371,7 +413,7 @@ async fn sign_discover(context: &impl Backend) -> Result<Outcome, String> {
         }
         let course = context.course(chosen.id).await?;
         if course.sign_config.is_some() {
-            tasks.extend(sign_tasks(&course, Some(SIGN), now_ms())?);
+            tasks.extend(sign_tasks(&course, Some(SIGN), now_ms(), seed)?);
         }
     }
     Ok(Outcome {
@@ -389,22 +431,49 @@ fn sign_window(config: &SignConfig, checkout: bool) -> (i64, i64) {
     (start.timestamp() * 1000, end.timestamp() * 1000)
 }
 
-async fn sign_one(context: &impl Backend, task: &Task) -> Result<Outcome, String> {
+fn planned_sign_ms(
+    course: &Course,
+    checkout: bool,
+    start: i64,
+    end: i64,
+    seed: u64,
+) -> Option<i64> {
+    let boundary = if checkout {
+        course.schedule.course_end
+    } else {
+        course.schedule.course_start
+    };
+    let base = start.max(boundary.timestamp() * 1_000 - SIGN_LEAD_MS);
+    let jitter_bound = SIGN_JITTER_MS.min(end - base);
+    if jitter_bound <= 0 {
+        return None;
+    }
+    // The random seed is per installation, and the inputs identify one
+    // window. Rediscovery and restart keep that window's offset stable.
+    let mut hasher = DefaultHasher::new();
+    (seed, course.id, checkout, start).hash(&mut hasher);
+    Some(base + (hasher.finish() % jitter_bound as u64) as i64)
+}
+
+async fn sign_one(context: &impl Backend, task: &Task, seed: u64) -> Result<Outcome, String> {
     let payload: CourseTask =
         serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
     let course = context.course(payload.id).await?;
     ensure_selected(context, &course).await?;
     let config = course
         .sign_config
+        .as_ref()
         .ok_or("Course no longer supports self-service signing")?;
-    let (start, end) = sign_window(&config, payload.checkout);
+    let (start, end) = sign_window(config, payload.checkout);
     let now = now_ms();
     if now >= end {
         return Err("The remote signing window has passed".into());
     }
-    if now < start {
+    let due = planned_sign_ms(&course, payload.checkout, start, end, seed)
+        .ok_or("No time fits the preferred schedule within the signing window")?;
+    if now < due {
         return Ok(Outcome {
-            repeat_after_ms: Some(start - now),
+            repeat_after_ms: Some(due - now),
             ..Outcome::default()
         });
     }
@@ -444,7 +513,7 @@ mod tests {
                 let course = session.context.boya().query_course(chosen.id).await.unwrap();
                 if course.sign_config.is_some() {
                     self_service += 1;
-                    planned += sign_tasks(&course, None, now_ms()).unwrap().len();
+                    planned += sign_tasks(&course, None, now_ms(), 0).unwrap().len();
                 }
             }
             println!("Read-only API check: {} listed, {} selected, {} selected self-service, {} future sign windows", courses.len(), chosen.len(), self_service, planned);
@@ -525,11 +594,11 @@ mod tests {
     #[test]
     fn sign_windows_and_independent_manual_tasks() {
         let course = course(1, Category::Arts, true);
-        let tasks = sign_tasks(&course, Some(SIGN), 310_000).unwrap();
+        let tasks = sign_tasks(&course, Some(SIGN), 319_999, 0).unwrap();
         assert_eq!(tasks.len(), 2);
-        assert_eq!(tasks[0].due_ms, 310_000);
-        assert_eq!(sign_tasks(&course, None, 320_000).unwrap().len(), 1);
-        assert!(sign_tasks(&course, None, 400_000).unwrap().is_empty());
+        assert_eq!(tasks[0].due_ms, 319_999);
+        assert_eq!(sign_tasks(&course, None, 320_000, 0).unwrap().len(), 1);
+        assert!(sign_tasks(&course, None, 400_000, 0).unwrap().is_empty());
         let handler = BoyaHandler {
             data_dir: PathBuf::new(),
             disable_tls: false,
@@ -538,7 +607,7 @@ mod tests {
         handler.configure(&mut state, SIGN, json!({})).unwrap();
         assert!(policy(&state.settings).unwrap().auto_sign);
         state.enqueue(tasks[0].clone());
-        state.enqueue(sign_tasks(&course, None, 310_000).unwrap().remove(0));
+        state.enqueue(sign_tasks(&course, None, 310_000, 0).unwrap().remove(0));
         handler.configure(&mut state, SIGN, json!({})).unwrap();
         assert!(!policy(&state.settings).unwrap().auto_sign);
         assert_eq!(state.tasks.len(), 1);
@@ -548,6 +617,64 @@ mod tests {
         handler.reconcile(&mut state);
         assert_eq!(state.tasks.len(), 1);
         assert!(state.tasks[0].group.is_none());
+    }
+
+    #[test]
+    fn sign_schedule_uses_course_boundaries_and_stays_within_remote_windows() {
+        let mut course = course(10392, Category::Arts, true);
+        course.schedule.course_start = DateTime::parse("2026-11-19 14:30").unwrap();
+        course.schedule.course_end = DateTime::parse("2026-11-19 16:00").unwrap();
+        let config = course.sign_config.as_mut().unwrap();
+        config.checkin_start = DateTime::parse("2026-11-19 13:00").unwrap();
+        config.checkin_end = DateTime::parse("2026-11-19 17:00").unwrap();
+        config.checkout_start = DateTime::parse("2026-11-19 15:00").unwrap();
+        config.checkout_end = DateTime::parse("2026-11-19 19:00").unwrap();
+        let planned = sign_tasks(&course, Some(SIGN), 0, 42).unwrap();
+        assert_eq!(planned.len(), 2);
+        for (task, time) in planned.iter().zip(["14:25", "15:55"]) {
+            let base = DateTime::parse(&format!("2026-11-19 {time}"))
+                .unwrap()
+                .timestamp()
+                * 1_000;
+            assert!((base..base + 30_000).contains(&task.due_ms));
+        }
+        let refreshed = sign_tasks(&course, None, 60_000, 42).unwrap();
+        for (same, original) in refreshed.iter().zip(&planned) {
+            assert_eq!(same.key, original.key);
+            assert_eq!(same.due_ms, original.due_ms);
+        }
+        let config = course.sign_config.as_mut().unwrap();
+        config.checkin_end = DateTime::parse("2026-11-19 14:25").unwrap();
+        config.checkout_start = DateTime::parse("2026-11-19 16:05").unwrap();
+        config.checkout_end = DateTime::parse("2026-11-19 16:05:01").unwrap();
+        let only_checkout = sign_tasks(&course, Some(SIGN), 0, 42).unwrap();
+        assert_eq!(only_checkout.len(), 1);
+        let base = DateTime::parse("2026-11-19 16:05").unwrap().timestamp() * 1_000;
+        assert!((base..base + 1_000).contains(&only_checkout[0].due_ms));
+    }
+
+    #[test]
+    fn preparing_legacy_state_refreshes_pending_discovery_only_once() {
+        let handler = BoyaHandler {
+            data_dir: PathBuf::new(),
+            disable_tls: false,
+        };
+        let mut state = State::default();
+        handler.configure(&mut state, SIGN, json!({})).unwrap();
+        state.tasks[0].due_ms = now_ms() + DISCOVER_INTERVAL;
+        handler.prepare(&mut state).unwrap();
+        assert!(state.tasks[0].due_ms <= now_ms());
+        let seed = policy(&state.settings).unwrap().sign_jitter_seed.unwrap();
+        let next = now_ms() + DISCOVER_INTERVAL;
+        state.tasks[0].due_ms = next;
+        let saved = serde_json::to_value(state).unwrap();
+        let mut recovered = serde_json::from_value::<State>(saved).unwrap();
+        handler.prepare(&mut recovered).unwrap();
+        assert_eq!(
+            policy(&recovered.settings).unwrap().sign_jitter_seed,
+            Some(seed)
+        );
+        assert_eq!(recovered.tasks[0].due_ms, next);
     }
 
     #[test]
@@ -637,7 +764,7 @@ mod tests {
         c.schedule.select_end = DateTime::from_timestamp(now + 100);
         c.schedule.course_end = DateTime::from_timestamp(now + 200);
         if let Some(config) = &mut c.sign_config {
-            config.checkin_start = DateTime::from_timestamp(now - 10);
+            config.checkin_start = DateTime::from_timestamp(now - 60);
             config.checkin_end = DateTime::from_timestamp(now + 100);
             config.checkout_start = DateTime::from_timestamp(now + 100);
             config.checkout_end = DateTime::from_timestamp(now + 200);
@@ -660,6 +787,7 @@ mod tests {
         let config = Policy {
             targets: BTreeMap::from([("arts".into(), 1)]),
             auto_sign: true,
+            ..Policy::default()
         };
         let plan = select_plan(&backend, &config).await.unwrap();
         assert_eq!(plan.tasks.len(), 2); // the non-self-service course is excluded
@@ -710,18 +838,28 @@ mod tests {
         let planned = execute(&backend, &plan, Policy::default()).await.unwrap();
         assert_eq!(planned.tasks.len(), 2);
         assert!(
-            sign_one(&backend, &planned.tasks[0])
+            sign_one(&backend, &planned.tasks[0], 0)
                 .await
                 .err()
                 .unwrap()
                 .contains("rejected")
         );
         assert!(
-            sign_one(&backend, &planned.tasks[1])
+            sign_one(&backend, &planned.tasks[1], 0)
                 .await
                 .unwrap()
                 .repeat_after_ms
                 .is_some()
+        );
+        let mut updated = backend;
+        updated.courses[0].schedule.course_start = DateTime::from_timestamp(now_ms() / 1_000 + 350);
+        assert!(
+            sign_one(&updated, &planned.tasks[0], 0)
+                .await
+                .unwrap()
+                .repeat_after_ms
+                .is_some(),
+            "An already queued task must defer if the course time moves later"
         );
     }
 }

@@ -99,13 +99,24 @@ The same executable acts as client or daemon. Initial automation is Boya:
   each round. The isolated daemon shut down cleanly. The test did not write to
   the existing credential files or send enrollment, check-in or check-out
   requests, so live mutations remain outside this validation.
+- Background signing targets the later of the remote window opening and five
+  minutes before class starts (check-in) or ends (check-out), plus a stable
+  random offset shorter than 30 seconds, limited to the time remaining in the
+  window. The daemon persists a
+  separate Boya seed and retains the window-based task keys. An existing
+  installation refreshes automatic sign tasks on the first startup after
+  upgrading; the execution handler also rechecks the rule on fresh course
+  details. The legacy interactive `boya check <ID>` keeps its original timing.
+  Seventeen offline tests and strict Clippy passed, including a legacy state
+  refresh, rediscovery without a changed offset, and narrow-window scheduling.
 
 ## Extension points and operational details
 
 - `src/server/task.rs`: durable task model, priority, expiration, deduplication
   and bounded wall-clock waits. It has no dependency on Boya types or semantics.
 - `src/server/mod.rs`: single-owner state loop and the `Handler` interface.
-  `configure`/`submit` validate client operations; `execute` returns new tasks or
+  `prepare` initializes domain state on startup; `configure`/`submit` validate
+  client operations; `execute` returns new tasks or
   a recurrence delay; `reconcile` validates results against the latest settings.
   Future domains can be composed in an application handler.
 - A single action runs at a time, serializing quota mutations. Read-only discovery
