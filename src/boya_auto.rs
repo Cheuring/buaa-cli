@@ -13,7 +13,7 @@ use crate::server::task::{Outcome, State, Task, now_ms};
 
 const SELECT: &str = "boya.auto.select";
 const SIGN: &str = "boya.auto.sign";
-const DISCOVER_INTERVAL: i64 = 60_000;
+const DISCOVER_INTERVAL: i64 = 30 * 60 * 1_000;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

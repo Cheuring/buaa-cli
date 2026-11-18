@@ -154,7 +154,11 @@ before every enrollment, and verifies the selected list after submitting. Config
 targets remain active, so newly available courses and later quota shortages are
 discovered on subsequent scans. Set each configured category to `0` to stop it.
 
-Continuous signing discovers all selected self-service courses every minute,
+Both policies start with an immediate scan when enabled and schedule each
+subsequent scan 30 minutes after the previous successful scan. Scheduled
+course actions still run at their own due times.
+
+Continuous signing discovers all selected self-service courses,
 including courses selected later. It schedules separate check-in and check-out
 tasks within their respective windows. Selection and signing are independent:
 enable automatic signing separately if you want newly enrolled courses signed.

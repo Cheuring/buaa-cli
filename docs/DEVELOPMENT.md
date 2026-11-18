@@ -85,7 +85,8 @@ The same executable acts as client or daemon. Initial automation is Boya:
   is marked preemptible and low priority; check-in/out has higher priority than
   selection. Tasks have a 45-second timeout. Network latency can delay actions;
   this is a wall-clock scheduler, not a hard real-time guarantee.
-- `src/boya_auto.rs` owns policy settings, one-minute discovery and course windows;
+- `src/boya_auto.rs` owns policy settings, the shared 30-minute discovery interval
+  and course windows;
   `src/boya_auto/backend.rs` adapts the pinned university API and allows mock tests.
 - Enrollment handlers verify the selected list after mutation because the pinned
   upstream `select_course` does not parse its business-status response. Each retry
