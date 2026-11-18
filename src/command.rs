@@ -30,6 +30,8 @@ pub enum Commands {
     Wifi(Wifi),
     /// Manage the local background task server
     Server(Server),
+    /// Configure task notifications sent to your phone
+    Notify(Notify),
 }
 
 #[derive(Parser, Debug)]
@@ -109,6 +111,35 @@ pub enum ServerSub {
     /// Run in the foreground (used internally by `start`)
     #[command(hide = true)]
     Run,
+}
+
+#[derive(Debug, Args)]
+pub struct Notify {
+    #[command(subcommand)]
+    pub command: NotifySub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NotifySub {
+    /// Configure a device on the official Bark server
+    Bark {
+        #[command(subcommand)]
+        command: BarkSub,
+    },
+    /// Send a test message to the configured device
+    Test,
+    /// Show whether notifications are configured and enabled
+    Status,
+    /// Pause task notifications, keeping the existing configuration
+    Off,
+    /// Resume task notifications
+    On,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BarkSub {
+    /// Read the Device Key from a hidden prompt (or piped stdin)
+    Set,
 }
 
 #[cfg(test)]

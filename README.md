@@ -189,6 +189,29 @@ needed for background work, stop the server and start it with
 
 For contributors, see [AGENTS.md](AGENTS.md) and [development notes](docs/DEVELOPMENT.md).
 
+### Bark notifications (iOS)
+
+```sh
+buaa notify bark set  # Paste your Device Key at the hidden prompt
+buaa notify test      # Send one test notification, even while paused
+buaa notify status    # Show settings without displaying the key
+buaa notify off       # Pause background delivery, keeping the key
+buaa notify on        # Resume background delivery
+```
+
+Bark uses the official `https://api.day.app` server. You can also paste the
+official device URL from the Bark app instead of extracting the key yourself.
+The configuration is stored privately in `server/notify.json` under the data
+directory. It can be changed while the background server is running.
+
+Background Boya tasks send a message after confirmed enrollment, check-in or
+check-out, or when an action finally fails or expires. Intermediate retries and
+discovery scans stay in the server log. Messages include the result, available
+course details, selected totals versus configured semester targets, and the
+next few queued actions. If the totals cannot be fetched, the message still
+goes out with the totals marked unknown. Delivery is best effort: a push
+failure is logged separately and never retries the Boya action.
+
 ## Smart Classroom
 
 ```sh

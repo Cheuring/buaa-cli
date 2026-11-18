@@ -37,6 +37,9 @@ pub struct Task {
     /// An authoritative planner may discover a new need for a finished action.
     #[serde(default)]
     pub replace_finished: bool,
+    /// Optional domain context for rendering final notifications, separate from execution input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_data: Option<Value>,
     pub status: Status,
     pub attempts: u32,
     pub last_error: Option<String>,
@@ -55,6 +58,7 @@ impl Task {
             preemptible: false,
             max_attempts: Some(10),
             replace_finished: false,
+            notification_data: None,
             status: Status::Pending,
             attempts: 0,
             last_error: None,
@@ -111,6 +115,7 @@ impl State {
                 }
                 existing.expires_ms = task.expires_ms;
                 existing.payload = task.payload;
+                existing.notification_data = task.notification_data;
             }
         } else {
             self.tasks.push(task);
@@ -129,7 +134,8 @@ impl State {
         for task in &mut self.tasks {
             if task.status == Status::Pending && task.expires_ms.is_some_and(|end| now >= end) {
                 task.status = Status::Expired;
-                task.last_error = Some("Execution window has passed".into());
+                task.last_error
+                    .get_or_insert_with(|| "Execution window has passed".into());
                 expired.push(&*task);
             }
         }
@@ -190,6 +196,8 @@ pub struct Outcome {
     pub tasks: Vec<Task>,
     /// Recurrence is measured from completion; actual due checks use wall time.
     pub repeat_after_ms: Option<i64>,
+    /// The domain confirmed that a user-visible action actually succeeded.
+    pub notify_on_success: bool,
 }
 
 #[cfg(test)]

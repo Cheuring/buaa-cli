@@ -3,6 +3,7 @@
 mod backend;
 #[cfg(test)]
 mod live_soak;
+mod notification;
 use backend::Backend;
 use buaa_api::api::boya::{Category, Course, SignConfig};
 use serde::{Deserialize, Serialize};
@@ -186,6 +187,15 @@ impl Handler for BoyaHandler {
             .map_err(|e| format!("Failed to save auth: {e}"))?;
         result
     }
+
+    async fn notification(
+        &self,
+        task: &Task,
+        state: &State,
+        finished_ms: i64,
+    ) -> Option<crate::notify::Message> {
+        notification::render(self, task, state, finished_ms).await
+    }
 }
 
 async fn execute(context: &impl Backend, task: &Task, config: Policy) -> Result<Outcome, String> {
@@ -261,7 +271,7 @@ async fn select_plan(context: &impl Backend, config: &Policy) -> Result<Outcome,
                 continue;
             }
             if selectable(&course, &config.targets, &counts, now_ms()) {
-                let due = (course.schedule.select_start.timestamp() * 1000).max(now_ms());
+                let start = course.schedule.select_start.timestamp() * 1_000;
                 let mut task = Task::new(
                     format!("boya.select:{}", course.id),
                     "boya.select",
@@ -269,8 +279,9 @@ async fn select_plan(context: &impl Backend, config: &Policy) -> Result<Outcome,
                         id: course.id,
                         checkout: false
                     }),
-                    due,
+                    start.max(now_ms()),
                 );
+                task.notification_data = Some(notification::course_summary(&course, start));
                 task.expires_ms = Some(course.schedule.select_end.timestamp() * 1000);
                 task.group = Some(SELECT.into());
                 task.max_attempts = None;
@@ -282,6 +293,7 @@ async fn select_plan(context: &impl Backend, config: &Policy) -> Result<Outcome,
             return Ok(Outcome {
                 tasks,
                 repeat_after_ms: Some(DISCOVER_INTERVAL),
+                ..Outcome::default()
             });
         }
     }
@@ -348,6 +360,7 @@ async fn select_one(
     };
     Ok(Outcome {
         tasks,
+        notify_on_success: true,
         ..Outcome::default()
     })
 }
@@ -396,6 +409,7 @@ fn sign_tasks(
             }),
             due.max(now),
         );
+        task.notification_data = Some(notification::course_summary(course, start));
         task.expires_ms = Some(expiry);
         task.priority = 20;
         task.max_attempts = None;
@@ -419,6 +433,7 @@ async fn sign_discover(context: &impl Backend, seed: u64) -> Result<Outcome, Str
     Ok(Outcome {
         tasks,
         repeat_after_ms: Some(DISCOVER_INTERVAL),
+        ..Outcome::default()
     })
 }
 
@@ -489,7 +504,10 @@ async fn sign_one(context: &impl Backend, task: &Task, seed: u64) -> Result<Outc
     if !result.is_ok {
         return Err("Boya rejected the sign location/result".into());
     }
-    Ok(Outcome::default())
+    Ok(Outcome {
+        notify_on_success: true,
+        ..Outcome::default()
+    })
 }
 
 #[cfg(test)]
@@ -793,7 +811,9 @@ mod tests {
         assert_eq!(plan.tasks.len(), 2); // the non-self-service course is excluded
         let first = select_one(&backend, &plan.tasks[0], &config).await.unwrap();
         assert_eq!(first.tasks.len(), 2); // enroll success schedules check-in/out
-        select_one(&backend, &plan.tasks[1], &config).await.unwrap();
+        assert!(first.notify_on_success);
+        let skipped = select_one(&backend, &plan.tasks[1], &config).await.unwrap();
+        assert!(!skipped.notify_on_success);
         assert_eq!(*backend.enrolled.lock().unwrap(), vec![1]);
         // A retry after a crash sees the remote selection and cannot enroll twice.
         select_one(&backend, &plan.tasks[0], &config).await.unwrap();

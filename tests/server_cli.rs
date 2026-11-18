@@ -52,6 +52,52 @@ impl Drop for Instance {
 }
 
 #[test]
+fn cli_bark_config_stays_private_and_can_pause_without_the_daemon() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let instance = Instance::new();
+    assert!(
+        instance
+            .ok(&["notify", "status"])
+            .contains("not configured")
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_buaa"))
+        .env("BUAA_DATA_DIR", &instance.0)
+        .args(["notify", "bark", "set"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"https://api.day.app/example-device-key\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("example-device-key"));
+    let config_file = instance.0.join("server/notify.json");
+    assert!(config_file.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            config_file.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    instance.ok(&["notify", "off"]);
+    assert!(instance.ok(&["notify", "status"]).contains("paused"));
+    instance.ok(&["notify", "on"]);
+    let status = instance.ok(&["notify", "status"]);
+    assert!(status.contains("enabled"));
+    assert!(!status.contains("example-device-key"));
+    assert!(!instance.0.join("server/state.json").exists());
+}
+
+#[test]
 fn cli_lifecycle_and_durable_configuration() {
     let instance = Instance::new();
     assert!(instance.ok(&["server", "status"]).contains("Stopped"));

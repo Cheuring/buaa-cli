@@ -30,7 +30,22 @@ impl Handler for MockHandler {
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
         self.0.lock().unwrap().push((task.key, now_ms()));
-        Ok(Outcome::default())
+        Ok(Outcome {
+            notify_on_success: task.kind == "notifiable",
+            ..Outcome::default()
+        })
+    }
+
+    async fn notification(&self, task: &Task, _: &State, _: i64) -> Option<Message> {
+        if task.kind == "notifiable" {
+            self.0
+                .lock()
+                .unwrap()
+                .push(("notification worker".into(), now_ms()));
+            // Model a blocked notification. This must not stop the next task.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        None
     }
 }
 
@@ -58,6 +73,51 @@ async fn ready(dir: &Path) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("Test server did not start");
+}
+
+#[tokio::test]
+async fn slow_notification_does_not_delay_the_next_action() {
+    let temp = TestDir::new();
+    let dir = directory(&temp.0);
+    storage::private_dir(&dir).unwrap();
+    storage::write_json(
+        &dir.join("notify.json"),
+        &json!({"enabled": true, "device_key": "fixture-key"}),
+    )
+    .unwrap();
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::default();
+    let now = now_ms();
+    state.enqueue(Task::new("first".into(), "notifiable", json!({}), now));
+    state.enqueue(Task::new("second".into(), "mock", json!({}), now + 100));
+    storage::write_json(&dir.join("state.json"), &state).unwrap();
+    let server = tokio::spawn({
+        let path = temp.0.clone();
+        let handler = MockHandler(records.clone());
+        async move { run(&path, handler).await }
+    });
+    ready(&dir).await;
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let complete = {
+                let records = records.lock().unwrap();
+                records.iter().any(|(key, _)| key == "notification worker")
+                    && records.iter().any(|(key, _)| key == "second")
+            };
+            if complete {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("notification must not block the scheduler");
+    protocol::call(&dir, Request::Stop).await.unwrap();
+    server.await.unwrap().unwrap();
+    assert_eq!(
+        storage::load_state(&dir).unwrap().tasks[0].status,
+        Status::Succeeded
+    );
 }
 
 #[tokio::test]

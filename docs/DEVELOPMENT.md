@@ -119,6 +119,19 @@ The same executable acts as client or daemon. Initial automation is Boya:
   client operations; `execute` returns new tasks or
   a recurrence delay; `reconcile` validates results against the latest settings.
   Future domains can be composed in an application handler.
+- `src/notify.rs` owns private Device Key configuration, the official Bark
+  JSON POST transport, verification of its application-level response, and a
+  bounded delivery worker. Persist the task outcome before passing it to the
+  worker. Notification failure or worker cancellation does not replay tasks.
+  Keep the key in the dedicated config file and out of task state, IPC and logs.
+- `src/boya_auto/notification.rs` formats terminal results. Mark success for
+  notification only after the business action was confirmed. Discovery,
+  interim retries and no-op candidates do not count. Course details are
+  optional task metadata, separate from execution inputs. Fresh semester
+  counts have a short timeout and are optional.
+- The real-device smoke test used an isolated data directory: Bark's official
+  endpoint accepted a single verification notification and the user confirmed
+  receipt on iOS. No credential or live notification setting is committed.
 - A single action runs at a time, serializing quota mutations. Read-only discovery
   is marked preemptible and low priority; check-in/out has higher priority than
   selection. Tasks have a 45-second timeout. Network latency can delay actions;

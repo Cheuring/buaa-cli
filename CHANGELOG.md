@@ -13,6 +13,8 @@
     retries in a rotating server log.
   - Schedule background signing about five minutes before class starts or
     ends, constrained by the school's window, with up to 30 seconds of jitter.
+  - Add optional Bark notifications for background course actions, plus
+    configuration, test, status and pause/resume commands.
 - Fix
   - Protect concurrent CLI/server authentication updates with short file locks,
     atomic writes and stale-session checks.

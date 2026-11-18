@@ -25,6 +25,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
+use crate::notify::{Message, Queue as NotificationQueue};
+
 pub trait Handler: Send + Sync + 'static {
     /// Prepare persisted domain state before dispatching any recovered tasks.
     fn prepare(&self, _state: &mut State) -> io::Result<()> {
@@ -50,6 +52,16 @@ pub trait Handler: Send + Sync + 'static {
         task: Task,
         settings: serde_json::Value,
     ) -> impl Future<Output = Result<Outcome, String>> + Send;
+
+    /// Render a terminal task outcome outside the scheduler loop.
+    fn notification(
+        &self,
+        _task: &Task,
+        _state: &State,
+        _finished_ms: i64,
+    ) -> impl Future<Output = Option<Message>> + Send {
+        std::future::ready(None)
+    }
 }
 
 pub fn directory(data_dir: &Path) -> PathBuf {
@@ -196,13 +208,15 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
     let (tx, mut rx) = mpsc::channel::<Incoming>(32);
     let listener_task = tokio::spawn(accept(listener, endpoint.token, tx));
     let handler = Arc::new(handler);
+    let notifications = NotificationQueue::start(dir.clone(), handler.clone(), log.clone());
     let mut active: Option<(Task, Worker, Instant)> = None;
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
-        let expired = state.expire(now_ms());
+        let now = now_ms();
+        let expired = state.expire(now);
         if !expired.is_empty() {
-            for task in expired {
+            for task in &expired {
                 log.task(
                     "warn",
                     "task.expired",
@@ -210,8 +224,12 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
                     json!({"expires_ms": task.expires_ms}),
                 );
             }
-            state.compact(now_ms());
+            let expired: Vec<Task> = expired.into_iter().cloned().collect();
+            state.compact(now);
             storage::write_json(&dir.join("state.json"), &state)?;
+            for task in expired {
+                notifications.submit(task, &state, now);
+            }
         }
         if let Some((task, _, _)) = &active
             && task.preemptible
@@ -326,7 +344,10 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
                     Err(format!("Task worker {reason}"))
                 });
                 let planned_tasks = result.as_ref().ok().map(|outcome| outcome.tasks.len());
-                finish(&mut state, &task.key, result, now_ms());
+                let notify_on_success = result.as_ref().is_ok_and(|outcome| outcome.notify_on_success);
+                let finished_ms = now_ms();
+                finish(&mut state, &task.key, result, finished_ms);
+                let mut notify = None;
                 if let Some(completed) = state.tasks.iter().find(|t| t.key == task.key) {
                     let next_due_ms = (completed.status == Status::Pending).then_some(completed.due_ms);
                     log.task(
@@ -337,10 +358,18 @@ pub async fn run<H: Handler>(data_dir: &Path, handler: H) -> io::Result<()> {
                             "next_due_ms": next_due_ms, "error": completed.last_error,
                             "planned_tasks": planned_tasks}),
                     );
+                    if matches!(completed.status, Status::Failed | Status::Expired)
+                        || (completed.status == Status::Succeeded && notify_on_success)
+                    {
+                        notify = Some(completed.clone());
+                    }
                 }
                 handler.reconcile(&mut state);
                 state.compact(now_ms());
                 storage::write_json(&dir.join("state.json"), &state)?;
+                if let Some(completed) = notify {
+                    notifications.submit(completed, &state, finished_ms);
+                }
             },
             _ = tokio::time::sleep(wait) => {},
         }
