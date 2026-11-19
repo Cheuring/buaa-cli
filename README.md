@@ -35,10 +35,11 @@ Now throw it in the trash and try this tool
 # Install
 
 1. Download from [release](https://github.com/fontlos/buaa-cli/release)
-2. Install from source:
+2. Install from source. Cargo fetches the pinned API revision from
+   [Cheuring/buaa-api](https://github.com/Cheuring/buaa-api). Run from the
+   `buaa-cli` checkout:
+
    ```sh
-   git clone https://github.com/fontlos/buaa-cli
-   cd buaa-cli
    # Rust 1.89 or newer
    cargo build --release
    ```

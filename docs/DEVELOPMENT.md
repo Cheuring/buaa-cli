@@ -110,6 +110,22 @@ The same executable acts as client or daemon. Initial automation is Boya:
   Seventeen offline tests and strict Clippy passed, including a legacy state
   refresh, rediscovery without a changed offset, and narrow-window scheduling.
 
+## Boya API dependency (2026-11-19)
+
+- Cargo pins `buaa_api` to revision `0fad52f` from
+  [Cheuring/buaa-api](https://github.com/Cheuring/buaa-api/tree/codex/boya-sso-recovery).
+  This source can be fetched directly by Cargo on both hosts and in CI.
+- `SsoApi::get_cas_service()` tries the saved Cookie and reuses SSO's
+  existing form submission when CAS returns a login form. It retries the
+  service GET once with the refreshed session. `BoyaApi::login()`
+  reads the token from the resulting URL and stores it before the business
+  request. Interactive commands and background tasks use this path.
+- The fork-pinned CLI passed 20 offline tests and release builds on both
+  macOS and Ubuntu 24.04 WSL. macOS also passed strict Clippy and a real
+  read-only statistics query with an empty Cookie store and a locally
+  fresh SSO timestamp. Both release binaries passed isolated lifecycle
+  checks before replacing the running instances.
+
 ## Extension points and operational details
 
 - `src/server/task.rs`: durable task model, priority, expiration, deduplication
@@ -138,9 +154,9 @@ The same executable acts as client or daemon. Initial automation is Boya:
   this is a wall-clock scheduler, not a hard real-time guarantee.
 - `src/boya_auto.rs` owns policy settings, the shared 30-minute discovery interval
   and course windows;
-  `src/boya_auto/backend.rs` adapts the pinned university API and allows mock tests.
-- Enrollment handlers verify the selected list after mutation because the pinned
-  upstream `select_course` does not parse its business-status response. Each retry
+  `src/boya_auto/backend.rs` adapts the university API and allows mock tests.
+- Enrollment handlers verify the selected list after mutation because
+  `select_course` does not parse its business-status response. Each retry
   reconciles remote selections before submitting again.
 - Selection targets are persistent and update only supplied categories; `0`
   disables a category. They are applied to the server-reported current semester.
@@ -171,6 +187,10 @@ The same executable acts as client or daemon. Initial automation is Boya:
   signing discovery planned both windows. The two instances do not share
   completion records or quotas; running both can duplicate writes or pushes.
   After Windows restarts or WSL shuts down, run `buaa server start` again.
+- On 2026-11-19, both existing daemons were restarted with the CLI built
+  from the fork-pinned API. Each instance kept its own data directory and
+  settings. A new SSH connection verified the WSL daemon was still running
+  and executing the staged build.
 
 ## Verification commands
 

@@ -5,8 +5,9 @@ edition = "2024"
 rust-version = "1.89"
 
 [dependencies]
-buaa_api = { git = "https://github.com/fontlos/buaa-api", rev = "1d64194"}
+# buaa_api = { git = "https://github.com/fontlos/buaa-api", rev = "1d64194"}
 # buaa_api = { path = "../buaa-api" }
+buaa_api = { git = "https://github.com/Cheuring/buaa-api.git", rev = "0fad52f5aa6d95b07eeb5189f679b68056a74475" }
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.3.4"
 reqwest = { version = "0.13", features = ["json"] }
