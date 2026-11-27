@@ -245,7 +245,7 @@ event and removes it after acceptance. The same test exercised the chat
 command, model tool, and denial of group and unrecognized queries. After
 deployment, the live container successfully read daemon status, selected
 courses, and progress through the read-only bridge. AstrBot registered the
-tool. Live QQ push receipt remains unverified.
+tool. That deployment's checks used simulated QQ push acknowledgements.
 
 The expanded Win deployment passed 13 live read-only probes from AstrBot,
 including daily, term, and per-course Smart Classroom queries. The service
@@ -254,8 +254,17 @@ the flat-array form of the exam response. There was no pending evaluation
 form to inspect live. Isolated tests covered the command and tool paths,
 private-only access, no side effect at preview, rejection of wrong and used
 codes, and confirmed notification setup and daemon start/stop. Formatting,
-strict Clippy, 22 offline tests, and the WSL release build passed. Live school
-mutations and mobile QQ receipts were outside this validation.
+strict Clippy, 22 offline tests, and the WSL release build passed. Live
+school mutations were outside this validation.
+
+A live test on 2026-11-27 reached the bound QQ private chat twice. The
+installed QQ adapter returned a dictionary with a message ID. The plugin
+only checked an object attribute and left the successfully sent record
+queued. After the recipient confirmed receipt, the test record was
+removed. The plugin now uses AstrBot's own message ID extraction for
+dictionary and object acknowledgements. An isolated test with the installed
+BotPy reply type reproduced the original failure, verified removal after a
+valid acknowledgement, and retained messages with missing IDs for retry.
 
 ## Verification commands
 

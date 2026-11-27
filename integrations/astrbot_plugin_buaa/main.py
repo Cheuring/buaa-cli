@@ -211,7 +211,7 @@ class Boya(Star):
                 ),
                 timeout=20,
             )
-            if not getattr(receipt, "id", None):
+            if not platform._extract_message_id(receipt):
                 raise RuntimeError("QQ did not acknowledge the message")
             event.unlink()
             logger.info("BUAA QQ notification accepted")
