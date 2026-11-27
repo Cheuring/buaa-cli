@@ -3,6 +3,7 @@ mod boya;
 mod boya_auto;
 mod captcha;
 mod class;
+mod class_jobs;
 mod command;
 mod exam;
 mod notify;
@@ -114,6 +115,8 @@ async fn main() {
             }
         },
         Commands::Server(_) | Commands::Notify(_) => unreachable!("Handled before loading auth"),
+        #[cfg(unix)]
+        Commands::QqBridge => unreachable!("Handled before loading auth"),
     }
     match session.save(explicit_login) {
         Ok(_) => {}
@@ -127,14 +130,11 @@ async fn background_command(cli: &Cli, path: &std::path::Path) -> Option<std::io
     use server::protocol::Request;
     let request = match &cli.command {
         Commands::Notify(args) => return Some(notify::command(path, &args.command).await),
+        #[cfg(unix)]
+        Commands::QqBridge => return Some(qq_bridge::run(path, cli.disable_tls).await),
         Commands::Server(server) => match server.command {
             ServerSub::Start => return Some(server::start(path, cli.disable_tls).await),
             ServerSub::Run => {
-                #[cfg(unix)]
-                let _qq_bridge = qq_bridge::start(path, cli.disable_tls).unwrap_or_else(|_| {
-                    eprintln!("[Warning]::<QQ>: Could not start the local query bridge");
-                    None
-                });
                 return Some(
                     server::run(
                         path,

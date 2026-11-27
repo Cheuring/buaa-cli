@@ -142,7 +142,10 @@ pub async fn checkin_schedule(context: &Context, id: &str) {
 }
 
 /// 解析 YYYYMMDD 格式的日期字符串
-fn parse_datetime(s: &str) -> Result<DateTime, &'static str> {
+pub(crate) fn parse_datetime(s: &str) -> Result<DateTime, &'static str> {
+    if s.len() != 8 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Invalid date");
+    }
     let year = s[0..4].parse::<i32>().map_err(|_| "Invalid year")?;
     let month = s[4..6].parse::<u32>().map_err(|_| "Invalid month")?;
     let month = Month::from_num(month).ok_or("Invalid month")?;

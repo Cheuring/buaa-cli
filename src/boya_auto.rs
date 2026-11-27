@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use crate::server::Handler;
 use crate::server::logging::task_event;
-use crate::server::task::{Outcome, State, Task, now_ms};
+use crate::server::task::{Outcome, State, Status, Task, now_ms};
 
 const SELECT: &str = "boya.auto.select";
 const SIGN: &str = "boya.auto.sign";
@@ -139,10 +139,16 @@ impl Handler for BoyaHandler {
                 )
             }
             SIGN => {
-                config.auto_sign = !config.auto_sign;
-                state.cancel_group(SIGN);
-                if config.auto_sign {
-                    state.enqueue(discover(SIGN));
+                let enabled = payload
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(!config.auto_sign);
+                if enabled != config.auto_sign {
+                    config.auto_sign = enabled;
+                    state.cancel_group(SIGN);
+                    if config.auto_sign {
+                        state.enqueue(discover(SIGN));
+                    }
                 }
                 format!(
                     "Boya automatic check-in/out {}",
@@ -160,28 +166,53 @@ impl Handler for BoyaHandler {
     }
 
     fn submit(&self, state: &mut State, kind: &str, payload: Value) -> Result<String, String> {
-        if kind != "boya.sign.plan" {
+        if kind == crate::class_jobs::CHECKIN {
+            return crate::class_jobs::submit(state, payload);
+        }
+        if !matches!(kind, "boya.sign.plan" | "boya.select.plan" | "boya.drop") {
             return Err(format!("Unknown submitted task kind: {kind}"));
         }
         let course: CourseTask = serde_json::from_value(payload).map_err(|e| e.to_string())?;
         if course.id == 0 {
             return Err("Course ID must be positive".into());
         }
-        let key = format!("boya.sign.plan:{}", course.id);
+        let key = format!("{kind}:{}", course.id);
+        if state
+            .tasks
+            .iter()
+            .any(|task| task.key == key && task.status == Status::Running)
+        {
+            return Ok(format!("课程 {} 的任务正在处理。", course.id));
+        }
         // Resubmission intentionally refreshes the remote course/sign windows.
         state.tasks.retain(|task| task.key != key);
-        state.enqueue(Task::new(key, kind, json!(course), now_ms()));
-        Ok(format!(
-            "Submitted check-in/out planning for course {}; inspect `buaa server status` for the result",
-            course.id
-        ))
+        let mut task = Task::new(key, kind, json!(course), now_ms());
+        if kind == "boya.drop" {
+            task.max_attempts = Some(1);
+        }
+        state.enqueue(task);
+        if kind == "boya.sign.plan" {
+            Ok(format!(
+                "Submitted check-in/out planning for course {}; inspect `buaa server status` for the result",
+                course.id,
+            ))
+        } else {
+            Ok(format!(
+                "已提交课程 {} 的任务（{kind}），可在服务状态查看执行结果。",
+                course.id
+            ))
+        }
     }
 
     async fn execute(&self, task: Task, settings: Value) -> Result<Outcome, String> {
         // Reload auth for every job, including an interactive login since last run.
         let session = crate::auth::Session::load(&self.data_dir, self.disable_tls, false)
             .map_err(|e| e.to_string())?;
-        let result = execute(&session.context, &task, policy(&settings)?).await;
+        let result = match task.kind.as_str() {
+            crate::class_jobs::CHECKIN => crate::class_jobs::execute(&session.context, &task).await,
+            "boya.drop" => drop_one(&session.context, &task).await,
+            _ => execute(&session.context, &task, policy(&settings)?).await,
+        };
         session
             .save(false)
             .map_err(|e| format!("Failed to save auth: {e}"))?;
@@ -194,6 +225,9 @@ impl Handler for BoyaHandler {
         state: &State,
         finished_ms: i64,
     ) -> Option<crate::notify::Message> {
+        if task.kind == crate::class_jobs::CHECKIN {
+            return crate::class_jobs::notification(task);
+        }
         notification::render(self, task, state, finished_ms).await
     }
 }
@@ -204,6 +238,7 @@ async fn execute(context: &impl Backend, task: &Task, config: Policy) -> Result<
         "boya.auto.select.discover" => select_plan(context, &config).await,
         "boya.auto.sign.discover" => sign_discover(context, seed).await,
         "boya.select" => select_one(context, task, &config).await,
+        "boya.select.plan" => select_requested(context, task).await,
         "boya.sign.plan" => {
             let payload: CourseTask =
                 serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
@@ -272,21 +307,7 @@ async fn select_plan(context: &impl Backend, config: &Policy) -> Result<Outcome,
             }
             if selectable(&course, &config.targets, &counts, now_ms()) {
                 let start = course.schedule.select_start.timestamp() * 1_000;
-                let mut task = Task::new(
-                    format!("boya.select:{}", course.id),
-                    "boya.select",
-                    json!(CourseTask {
-                        id: course.id,
-                        checkout: false
-                    }),
-                    start.max(now_ms()),
-                );
-                task.notification_data = Some(notification::course_summary(&course, start));
-                task.expires_ms = Some(course.schedule.select_end.timestamp() * 1000);
-                task.group = Some(SELECT.into());
-                task.max_attempts = None;
-                task.replace_finished = true;
-                tasks.push(task);
+                tasks.push(selection_task(&course, start, Some(SELECT)));
             }
         }
         if last {
@@ -298,6 +319,55 @@ async fn select_plan(context: &impl Backend, config: &Policy) -> Result<Outcome,
         }
     }
     Err("Course pagination exceeded the API's 255-page limit".into())
+}
+
+fn selection_task(course: &Course, start: i64, group: Option<&str>) -> Task {
+    let mut task = Task::new(
+        format!("boya.select:{}", course.id),
+        "boya.select",
+        json!(CourseTask {
+            id: course.id,
+            checkout: false
+        }),
+        start.max(now_ms()),
+    );
+    task.notification_data = Some(notification::course_summary(course, start));
+    task.expires_ms = Some(course.schedule.select_end.timestamp() * 1_000);
+    task.group = group.map(str::to_owned);
+    task.max_attempts = None;
+    task.replace_finished = true;
+    task
+}
+
+async fn select_requested(context: &impl Backend, task: &Task) -> Result<Outcome, String> {
+    let payload: CourseTask =
+        serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
+    let course = context.course(payload.id).await?;
+    let start = course.schedule.select_start.timestamp() * 1_000;
+    Ok(Outcome {
+        tasks: vec![selection_task(&course, start, None)],
+        ..Outcome::default()
+    })
+}
+
+async fn drop_one(context: &buaa_api::Context, task: &Task) -> Result<Outcome, String> {
+    let payload: CourseTask =
+        serde_json::from_value(task.payload.clone()).map_err(|e| e.to_string())?;
+    if !context.selected().await?.iter().any(|c| c.id == payload.id) {
+        return Ok(Outcome::default());
+    }
+    context
+        .boya()
+        .drop_course(payload.id)
+        .await
+        .map_err(|error| format!("drop_course: {}", error.kind()))?;
+    if context.selected().await?.iter().any(|c| c.id == payload.id) {
+        return Err("退课尚未在已选列表中确认。".into());
+    }
+    Ok(Outcome {
+        notify_on_success: true,
+        ..Outcome::default()
+    })
 }
 
 async fn select_one(
@@ -319,7 +389,14 @@ async fn select_one(
         );
         return Ok(Outcome::default());
     }
-    if !selectable(&course, &config.targets, &counts(&chosen), now_ms()) {
+    if task.group.is_none() {
+        if course.schedule.select_end.timestamp() * 1_000 <= now_ms() {
+            return Err("选课窗口已关闭。".into());
+        }
+        if course.capacity.current >= course.capacity.max {
+            return Err("课程当前满员。".into());
+        }
+    } else if !selectable(&course, &config.targets, &counts(&chosen), now_ms()) {
         task_event(
             "info",
             "boya.enrollment.result",
@@ -348,7 +425,7 @@ async fn select_one(
     if !confirmed {
         return Err("Enrollment was not confirmed by the selected course list".into());
     }
-    let tasks = if config.auto_sign {
+    let tasks = if config.auto_sign && course.sign_config.is_some() {
         sign_tasks(
             &course,
             Some(SIGN),

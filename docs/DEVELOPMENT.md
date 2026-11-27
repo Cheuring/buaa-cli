@@ -194,26 +194,43 @@ The same executable acts as client or daemon. Initial automation is Boya:
 
 ## Optional AstrBot QQ integration
 
-The Win WSL installation can enable QQ alongside Bark. Write a private
+The Win WSL installation sends task notifications to QQ. Write a private
 `server/qq.json` in its BUAA data directory with one field, `directory`, set
 to the absolute WSL path to `data/.buaa-bridge` in the AstrBot Compose project.
-Create that dedicated directory with mode 0700, then start or restart the
-Buaa daemon. Instances without this file do not start a bridge or queue QQ
-messages.
+Create that dedicated directory with mode 0700. The task daemon queues QQ
+messages when it starts with this file. Win Bark is separately paused.
 
 Install `integrations/astrbot_plugin_buaa` in AstrBot's `data/plugins` and
 provide a private `data/.buaa-bridge/owner.json` containing `platform` (the
 configured QQ Official adapter ID) and `openid` (the existing QQ C2C
-administrator's sender ID). Enable the plugin and its `query_buaa_boya` tool
-for that private conversation. The QQ recipient must allow proactive
-messages from the bot. The plugin uses AstrBot's existing QQ client.
+administrator's sender ID). Enable the plugin and its `query_buaa_boya` and
+`query_buaa_campus` tools for that private conversation. The QQ recipient
+must allow proactive messages from the bot. The plugin uses AstrBot's
+existing QQ client.
 
-The QQ owner can ask in natural language or use `/博雅 状态`, `/博雅 已选`,
-and `/博雅 统计`. Both paths check the QQ adapter, sender, conversation type,
-and administrator role. The model tool sends school data directly to QQ and
-returns only a delivery summary to the model. The bridge accepts three
-read-only operations on a private Unix socket. School credentials, the
-scheduler IPC token, and task payloads stay outside the container.
+The standalone WSL `buaa qq-bridge` process serves the private Unix socket
+even when the task server is stopped. Win uses two systemd user units.
+`buaa-qq-bridge.service` runs `buaa qq-bridge` with `BUAA_QQ_SYSTEMD=1`.
+`buaa-daemon.service` runs `buaa server run`. Both use the real Win data
+directory through `BUAA_DATA_DIR`. They share no process lifetime. The
+daemon uses `Restart=on-failure` so an explicit stop takes effect.
+
+The QQ owner can ask for Boya courses and progress, Smart Classroom
+schedules, exams, evaluations, service status, and notification status in
+natural language or using `/博雅` and `/北航`. Both paths check the QQ adapter,
+sender, conversation type, and administrator role. Tools send school data
+directly to QQ and return a delivery summary to the model.
+
+The command help lists enrollment, drops, check-ins, selection and signing
+policies, evaluations, campus Wi-Fi, and service and notification control.
+A write command prepares an exact preview and a two-minute one-time code.
+`/北航 确认 <code>` consumes the code before dispatch. The model tools expose
+queries only. Interactive SSO and Bark Device Key setup remain at the WSL
+terminal. School credentials and the scheduler IPC token stay outside the
+container. Boya manual actions and Smart Classroom check-ins use the same
+serial task daemon as the existing automation. Smart Classroom date-based
+jobs use absolute due timestamps. Evaluation commands use explicit task
+snapshots and recheck whether they remain pending before submission.
 
 Terminal outcomes are rendered once by the existing notification worker.
 When QQ is enabled, it writes an independent outbox entry before attempting
@@ -221,14 +238,24 @@ Bark. AstrBot retries pending entries after failures and deletes each one on
 QQ acknowledgement. An interrupted or ambiguous network acknowledgement can
 cause a duplicate push. QQ delivery starts with newly recorded outcomes.
 
-On 2026-11-27, the Win WSL deployment passed an isolated expired-task fixture
+The first Win WSL deployment passed an isolated expired-task fixture
 with Bark disabled. The AstrBot container reached the fixture daemon over its
 Unix socket. An adapter stub checked that the plugin retains an unacknowledged
 event and removes it after acceptance. The same test exercised the chat
 command, model tool, and denial of group and unrecognized queries. After
 deployment, the live container successfully read daemon status, selected
 courses, and progress through the read-only bridge. AstrBot registered the
-tool, and Win Bark was still enabled. Live QQ push receipt remains unverified.
+tool. Live QQ push receipt remains unverified.
+
+The expanded Win deployment passed 13 live read-only probes from AstrBot,
+including daily, term, and per-course Smart Classroom queries. The service
+handles the confirmed empty-list responses from Smart Classroom and TES and
+the flat-array form of the exam response. There was no pending evaluation
+form to inspect live. Isolated tests covered the command and tool paths,
+private-only access, no side effect at preview, rejection of wrong and used
+codes, and confirmed notification setup and daemon start/stop. Formatting,
+strict Clippy, 22 offline tests, and the WSL release build passed. Live school
+mutations and mobile QQ receipts were outside this validation.
 
 ## Verification commands
 

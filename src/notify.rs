@@ -90,6 +90,54 @@ fn require_config(config: Option<Config>) -> io::Result<Config> {
     config.ok_or_else(|| io::Error::other("Run `buaa notify bark set` first"))
 }
 
+#[cfg(unix)]
+pub(crate) fn bark_state(dir: &Path) -> io::Result<&'static str> {
+    Ok(match load(dir)? {
+        Some(config) if config.enabled => "开启",
+        Some(_) => "已暂停",
+        None => "未配置",
+    })
+}
+
+pub(crate) fn set_bark(dir: &Path, enabled: bool) -> io::Result<()> {
+    update(dir, |config| {
+        let mut config = require_config(config)?;
+        config.enabled = enabled;
+        Ok(config)
+    })
+}
+
+pub(crate) async fn test_bark(dir: &Path) -> io::Result<()> {
+    let config = require_config(load(dir)?)?;
+    send(
+        &client()?,
+        ENDPOINT,
+        &config,
+        &Message {
+            title: "BUAA CLI · Bark 测试通知".into(),
+            body: "这是一条测试消息。收到它表示 BUAA CLI 可以向你的设备推送通知。".into(),
+            group: "BUAA CLI".into(),
+        },
+    )
+    .await
+}
+
+#[cfg(unix)]
+pub(crate) fn test_qq(dir: &Path) -> io::Result<()> {
+    let directory = qq_directory(dir)?.ok_or_else(|| io::Error::other("QQ 未配置。"))?;
+    let outbox = directory.join("outbox");
+    storage::private_dir(&outbox)?;
+    enqueue_qq(
+        &outbox,
+        server::task::now_ms(),
+        &Message {
+            title: "BUAA CLI · QQ 测试通知".into(),
+            body: "这是你在 QQ 私聊中确认发送的测试消息。".into(),
+            group: "BUAA CLI".into(),
+        },
+    )
+}
+
 pub async fn command(data_dir: &Path, command: &NotifySub) -> io::Result<()> {
     let dir = server::directory(data_dir);
     match command {
@@ -123,29 +171,14 @@ pub async fn command(data_dir: &Path, command: &NotifySub) -> io::Result<()> {
         },
         NotifySub::On | NotifySub::Off => {
             let enabled = matches!(command, NotifySub::On);
-            update(&dir, |config| {
-                let mut config = require_config(config)?;
-                config.enabled = enabled;
-                Ok(config)
-            })?;
+            set_bark(&dir, enabled)?;
             println!(
                 "Bark notifications {}.",
                 if enabled { "enabled" } else { "paused" }
             );
         }
         NotifySub::Test => {
-            let config = require_config(load(&dir)?)?;
-            send(
-                &client()?,
-                ENDPOINT,
-                &config,
-                &Message {
-                    title: "BUAA CLI · Bark 测试通知".into(),
-                    body: "这是一条测试消息。收到它表示 BUAA CLI 可以向你的设备推送通知。".into(),
-                    group: "BUAA CLI".into(),
-                },
-            )
-            .await?;
+            test_bark(&dir).await?;
             println!("Bark accepted the test notification; check your phone.");
         }
     }

@@ -455,7 +455,7 @@ async fn accept(listener: TcpListener, token: String, tx: mpsc::Sender<Incoming>
     }
 }
 
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let mut terminate =

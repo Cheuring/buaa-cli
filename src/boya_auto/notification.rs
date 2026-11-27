@@ -54,6 +54,7 @@ fn category(key: &str) -> &str {
 fn action(task: &Task, payload: &CourseTask) -> Option<&'static str> {
     match task.kind.as_str() {
         "boya.select" => Some("选课"),
+        "boya.drop" => Some("退课"),
         "boya.sign" if payload.checkout => Some("签退"),
         "boya.sign" => Some("签到"),
         _ => None,

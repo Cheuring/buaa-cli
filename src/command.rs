@@ -32,6 +32,9 @@ pub enum Commands {
     Server(Server),
     /// Configure task notifications sent to your phone
     Notify(Notify),
+    #[cfg(unix)]
+    #[command(hide = true)]
+    QqBridge,
 }
 
 #[derive(Parser, Debug)]

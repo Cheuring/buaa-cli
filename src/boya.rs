@@ -19,14 +19,15 @@ pub async fn query(context: &Context, all: bool, page: u8) {
         print_course(courses.iter());
     } else {
         let time = DateTime::now();
-        let courses = courses.iter().filter(|course| {
-            course.selected
-                || (course.capacity.current < course.capacity.max
-                    && course.schedule.select_end > time)
-        });
+        let courses = courses.iter().filter(|course| visible_course(course, time));
 
         print_course(courses);
     }
+}
+
+pub(crate) fn visible_course(course: &Course, now: DateTime) -> bool {
+    course.selected
+        || (course.capacity.current < course.capacity.max && course.schedule.select_end > now)
 }
 
 pub async fn select(context: &Context, id: u32) {
