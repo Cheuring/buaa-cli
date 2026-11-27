@@ -192,6 +192,44 @@ The same executable acts as client or daemon. Initial automation is Boya:
   settings. A new SSH connection verified the WSL daemon was still running
   and executing the staged build.
 
+## Optional AstrBot QQ integration
+
+The Win WSL installation can enable QQ alongside Bark. Write a private
+`server/qq.json` in its BUAA data directory with one field, `directory`, set
+to the absolute WSL path to `data/.buaa-bridge` in the AstrBot Compose project.
+Create that dedicated directory with mode 0700, then start or restart the
+Buaa daemon. Instances without this file do not start a bridge or queue QQ
+messages.
+
+Install `integrations/astrbot_plugin_buaa` in AstrBot's `data/plugins` and
+provide a private `data/.buaa-bridge/owner.json` containing `platform` (the
+configured QQ Official adapter ID) and `openid` (the existing QQ C2C
+administrator's sender ID). Enable the plugin and its `query_buaa_boya` tool
+for that private conversation. The QQ recipient must allow proactive
+messages from the bot. The plugin uses AstrBot's existing QQ client.
+
+The QQ owner can ask in natural language or use `/博雅 状态`, `/博雅 已选`,
+and `/博雅 统计`. Both paths check the QQ adapter, sender, conversation type,
+and administrator role. The model tool sends school data directly to QQ and
+returns only a delivery summary to the model. The bridge accepts three
+read-only operations on a private Unix socket. School credentials, the
+scheduler IPC token, and task payloads stay outside the container.
+
+Terminal outcomes are rendered once by the existing notification worker.
+When QQ is enabled, it writes an independent outbox entry before attempting
+Bark. AstrBot retries pending entries after failures and deletes each one on
+QQ acknowledgement. An interrupted or ambiguous network acknowledgement can
+cause a duplicate push. QQ delivery starts with newly recorded outcomes.
+
+On 2026-11-27, the Win WSL deployment passed an isolated expired-task fixture
+with Bark disabled. The AstrBot container reached the fixture daemon over its
+Unix socket. An adapter stub checked that the plugin retains an unacknowledged
+event and removes it after acceptance. The same test exercised the chat
+command, model tool, and denial of group and unrecognized queries. After
+deployment, the live container successfully read daemon status, selected
+courses, and progress through the read-only bridge. AstrBot registered the
+tool, and Win Bark was still enabled. Live QQ push receipt remains unverified.
+
 ## Verification commands
 
 ```sh

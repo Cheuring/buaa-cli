@@ -220,7 +220,7 @@ fn tabled_schedule(time: &Schedule) -> String {
     )
 }
 
-fn tabled_category(category: &Category) -> String {
+pub(crate) fn tabled_category(category: &Category) -> String {
     match category {
         Category::Arts => "美育".to_string(),
         Category::Ethics => "德育".to_string(),

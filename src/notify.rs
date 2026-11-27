@@ -26,6 +26,21 @@ struct Config {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+struct QqConfig {
+    directory: PathBuf,
+}
+
+pub(crate) fn qq_directory(dir: &Path) -> io::Result<Option<PathBuf>> {
+    match storage::read_json::<QqConfig>(&dir.join("qq.json")) {
+        Ok(config) if config.directory.is_absolute() => Ok(Some(config.directory)),
+        Ok(_) => Err(io::Error::other("QQ directory must be absolute")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(io::Error::other("Cannot read QQ configuration")),
+    }
+}
+
+#[derive(Serialize)]
 pub(crate) struct Message {
     pub title: String,
     pub body: String,
@@ -253,10 +268,32 @@ async fn deliver<H: Handler>(
     log: Log,
     mut rx: mpsc::Receiver<Event>,
 ) {
+    let qq = match qq_directory(&dir).and_then(|directory| {
+        directory
+            .map(|directory| {
+                storage::private_dir(&directory)?;
+                let outbox = directory.join("outbox");
+                storage::private_dir(&outbox)?;
+                Ok::<_, io::Error>(outbox)
+            })
+            .transpose()
+    }) {
+        Ok(directory) => directory,
+        Err(_) => {
+            log.event(
+                "warn",
+                "notification.failed",
+                json!({
+                    "provider": "qq", "error": "Cannot initialize QQ outbox"
+                }),
+            );
+            None
+        }
+    };
     let mut http = None;
     while let Some(event) = rx.recv().await {
         let result = async {
-            if !load(&dir)?.is_some_and(|config| config.enabled) {
+            if qq.is_none() && !load(&dir)?.is_some_and(|config| config.enabled) {
                 return Ok(());
             }
             let Ok(message) = tokio::time::timeout(
@@ -270,6 +307,23 @@ async fn deliver<H: Handler>(
             let Some(message) = message else {
                 return Ok(());
             };
+            if let Some(outbox) = &qq {
+                let record = enqueue_qq(outbox, event.finished_ms, &message);
+                log.task(
+                    if record.is_ok() { "info" } else { "warn" },
+                    if record.is_ok() {
+                        "notification.queued"
+                    } else {
+                        "notification.failed"
+                    },
+                    &event.task,
+                    if record.is_ok() {
+                        json!({"provider": "qq"})
+                    } else {
+                        json!({"provider": "qq", "error": "Cannot write QQ notification"})
+                    },
+                );
+            }
             // Honor an off command or key rotation while the text was prepared.
             let Some(config) = load(&dir)?.filter(|config| config.enabled) else {
                 return Ok(());
@@ -298,6 +352,13 @@ async fn deliver<H: Handler>(
             );
         }
     }
+}
+
+fn enqueue_qq(outbox: &Path, finished_ms: i64, message: &Message) -> io::Result<()> {
+    let mut nonce = [0; 8];
+    getrandom::fill(&mut nonce).map_err(|_| io::Error::other("Cannot identify QQ event"))?;
+    let name = format!("{finished_ms:013}-{:016x}.json", u64::from_be_bytes(nonce));
+    storage::write_json(&outbox.join(name), message)
 }
 
 #[cfg(test)]

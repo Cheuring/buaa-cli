@@ -6,6 +6,8 @@ mod class;
 mod command;
 mod exam;
 mod notify;
+#[cfg(unix)]
+mod qq_bridge;
 mod server;
 mod tes;
 mod utils;
@@ -128,6 +130,11 @@ async fn background_command(cli: &Cli, path: &std::path::Path) -> Option<std::io
         Commands::Server(server) => match server.command {
             ServerSub::Start => return Some(server::start(path, cli.disable_tls).await),
             ServerSub::Run => {
+                #[cfg(unix)]
+                let _qq_bridge = qq_bridge::start(path, cli.disable_tls).unwrap_or_else(|_| {
+                    eprintln!("[Warning]::<QQ>: Could not start the local query bridge");
+                    None
+                });
                 return Some(
                     server::run(
                         path,

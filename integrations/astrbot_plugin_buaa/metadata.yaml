@@ -1,0 +1,6 @@
+name: astrbot_plugin_buaa
+display_name: 北航博雅
+desc: 私聊查询博雅课程与进度，接收本机选课任务的结果。
+version: v1.0.0
+author: Cheuring
+repo: https://github.com/Cheuring/buaa-cli

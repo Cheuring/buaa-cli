@@ -46,7 +46,7 @@ async fn request<T>(
     result
 }
 
-pub(super) trait Backend: Sync {
+pub(crate) trait Backend: Sync {
     fn selected(&self) -> impl Future<Output = Result<Vec<Selected>>> + Send;
     fn courses(&self, page: u8) -> impl Future<Output = Result<Vec<Course>>> + Send;
     fn course(&self, id: u32) -> impl Future<Output = Result<Course>> + Send;

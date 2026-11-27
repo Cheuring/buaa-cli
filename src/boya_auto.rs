@@ -1,6 +1,6 @@
 //! Boya policies and handlers; scheduler/transport contain no course logic.
 
-mod backend;
+pub(crate) mod backend;
 #[cfg(test)]
 mod live_soak;
 mod notification;
