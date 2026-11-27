@@ -39,7 +39,6 @@ struct Request {
 }
 
 struct Pending {
-    code: String,
     expires: Instant,
     action: actions::Action,
 }
@@ -132,29 +131,40 @@ async fn handle(
     } else {
         serde_json::from_str(line).map_err(|_| "不支持的请求。")?
     };
-    if request.operation == "confirm" {
-        let action = take_confirmation(pending, &request.argument)?;
-        return timeout(Duration::from_secs(90), action.execute(path, disable_tls))
-            .await
-            .unwrap_or_else(|_| Err("操作超时，执行结果未确认。请先查询实际状态。".into()));
+    expire_pending(pending);
+    if matches!(request.operation.as_str(), "confirm" | "cancel") {
+        if !request.argument.is_empty() {
+            return Err("请直接回复「确认」或「取消」。".into());
+        }
+        let entry = pending.take().ok_or("没有待确认的操作，或操作已过期。")?;
+        if request.operation == "cancel" {
+            return Ok("已取消这次操作。".into());
+        }
+        return timeout(
+            Duration::from_secs(90),
+            entry.action.execute(path, disable_tls),
+        )
+        .await
+        .unwrap_or_else(|_| Err("操作超时，执行结果未确认。请先查询实际状态。".into()));
     }
     if let Some(operation) = request.operation.strip_prefix("prepare.") {
+        if pending.is_some() {
+            return Err(
+                "已有一项待确认的操作。请回复「确认」执行上一项，或回复「取消」后重新发起。".into(),
+            );
+        }
         let (preview, action) = timeout(
             Duration::from_secs(20),
             actions::Action::prepare(operation, &request.argument, path, disable_tls),
         )
         .await
         .map_err(|_| "准备操作超时，请稍后重试。")??;
-        let mut random = [0; 4];
-        getrandom::fill(&mut random).map_err(|_| "无法生成确认码。")?;
-        let code = format!("{:08X}", u32::from_be_bytes(random));
         *pending = Some(Pending {
-            code: code.clone(),
             expires: Instant::now() + Duration::from_secs(120),
             action,
         });
         return Ok(format!(
-            "{preview}\n输入 /北航 确认 {code} 执行。确认码 2 分钟有效。"
+            "{preview}\n请在 2 分钟内直接回复「确认」执行，或回复「取消」。"
         ));
     }
     timeout(
@@ -165,23 +175,13 @@ async fn handle(
     .unwrap_or_else(|_| Err("查询超时，请稍后重试。".into()))
 }
 
-fn take_confirmation(
-    pending: &mut Option<Pending>,
-    code: &str,
-) -> Result<actions::Action, &'static str> {
+fn expire_pending(pending: &mut Option<Pending>) {
     if pending
         .as_ref()
         .is_some_and(|p| p.expires <= Instant::now())
     {
         *pending = None;
     }
-    let entry = pending
-        .as_ref()
-        .ok_or("没有待确认的操作，或确认码已失效。")?;
-    if !entry.code.eq_ignore_ascii_case(code) {
-        return Err("确认码不匹配。");
-    }
-    Ok(pending.take().expect("checked pending entry").action)
 }
 
 fn session(path: &Path, disable_tls: bool) -> Result<Session, &'static str> {
@@ -241,25 +241,45 @@ async fn statistics(context: &Context) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn confirmation_expires_and_cannot_be_replayed() {
-        let mut pending = Some(Pending {
-            code: "A10B".into(),
-            expires: Instant::now() + Duration::from_secs(2),
-            action: actions::Action::Bark(false),
-        });
-        assert!(take_confirmation(&mut pending, "AAAA").is_err());
+    #[tokio::test]
+    async fn confirming_or_cancelling_always_refers_to_the_same_unexpired_preview() {
+        let mut pending = None;
+        let path = Path::new("");
+        let prepare = r#"{"operation":"prepare.bark_off"}"#;
+        let confirm = r#"{"operation":"confirm"}"#;
+        let cancel = r#"{"operation":"cancel"}"#;
+        assert!(handle(confirm, path, false, &mut pending).await.is_err());
+        let preview = handle(prepare, path, false, &mut pending).await.unwrap();
+        assert!(preview.contains("直接回复「确认」"));
+        assert!(
+            handle(
+                r#"{"operation":"prepare.bark_on"}"#,
+                path,
+                false,
+                &mut pending
+            )
+            .await
+            .is_err()
+        );
         assert!(matches!(
-            take_confirmation(&mut pending, "a10b"),
-            Ok(actions::Action::Bark(false))
+            &pending.as_ref().unwrap().action,
+            actions::Action::Bark(false)
         ));
-        assert!(take_confirmation(&mut pending, "A10B").is_err());
-        pending = Some(Pending {
-            code: "A10B".into(),
-            expires: Instant::now(),
-            action: actions::Action::Bark(false),
-        });
-        assert!(take_confirmation(&mut pending, "A10B").is_err());
+        assert!(
+            handle(
+                r#"{"operation":"confirm","argument":"1234"}"#,
+                path,
+                false,
+                &mut pending
+            )
+            .await
+            .is_err()
+        );
+        assert!(handle(cancel, path, false, &mut pending).await.is_ok());
+        assert!(handle(confirm, path, false, &mut pending).await.is_err());
+        handle(prepare, path, false, &mut pending).await.unwrap();
+        pending.as_mut().unwrap().expires = Instant::now();
+        assert!(handle(confirm, path, false, &mut pending).await.is_err());
         assert!(pending.is_none());
     }
 }

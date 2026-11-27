@@ -223,10 +223,11 @@ directly to QQ and return a delivery summary to the model.
 
 The command help lists enrollment, drops, check-ins, selection and signing
 policies, evaluations, campus Wi-Fi, and service and notification control.
-A write command prepares an exact preview and a two-minute one-time code.
-`/北航 确认 <code>` consumes the code before dispatch. The model tools expose
-queries only. Interactive SSO and Bark Device Key setup remain at the WSL
-terminal. School credentials and the scheduler IPC token stay outside the
+A write command shows the operation details and holds that operation for two
+minutes. In the authorized QQ private chat, reply `确认` to execute it once or
+`取消` to discard it. A new write request cannot replace an active preview.
+The model tools expose queries only. Interactive SSO and Bark Device Key
+setup remain at the WSL terminal. School credentials and the scheduler IPC token stay outside the
 container. Boya manual actions and Smart Classroom check-ins use the same
 serial task daemon as the existing automation. Smart Classroom date-based
 jobs use absolute due timestamps. Evaluation commands use explicit task
@@ -265,6 +266,11 @@ removed. The plugin now uses AstrBot's own message ID extraction for
 dictionary and object acknowledgements. An isolated test with the installed
 BotPy reply type reproduced the original failure, verified removal after a
 valid acknowledgement, and retained messages with missing IDs for retry.
+
+The direct reply flow passed isolated checks with the installed AstrBot filters
+and WSL bridge. Plain `确认` executed a fixture action once and `取消` discarded
+it. Group and non-admin events did not reach the action. Rust tests also
+covered expiry and refusal to overwrite a pending preview.
 
 ## Verification commands
 

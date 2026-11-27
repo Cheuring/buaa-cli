@@ -36,6 +36,7 @@ CAMPUS_ACTIONS = {
 }
 TOOL = "query_buaa_boya"
 CAMPUS_TOOL = "query_buaa_campus"
+CONFIRMATION_REPLIES = {"确认": "confirm", "取消": "cancel"}
 
 BOYA_HELP = """博雅查询
 /博雅 状态、已选、统计、可选 [页码]、全部 [页码]
@@ -43,7 +44,7 @@ BOYA_HELP = """博雅查询
 /博雅 选课|退课|签到 课程ID
 /博雅 自动选课 德育=3,美育=1
 /博雅 自动签到 开|关
-/北航 确认 确认码"""
+看到操作详情后，直接回复「确认」或「取消」"""
 
 CAMPUS_HELP = """北航查询
 /北航 课表 [今天|明天|YYYYMMDD|课程ID|学期ID]
@@ -53,7 +54,7 @@ CAMPUS_HELP = """北航查询
 /北航 交评教 序号 {"answers":[1,2,null],"reason":"满分或不及格时填理由"}
 /北航 自动评教、校园网登录、校园网注销
 /北航 启动服务、停止服务、开启Bark、关闭Bark、测试通知 [QQ|Bark]
-/北航 确认 确认码
+看到操作详情后，直接回复「确认」或「取消」
 SSO 登录和 Bark Key 配置请在 WSL 终端操作。"""
 
 
@@ -127,13 +128,25 @@ class Boya(Star):
         parts = text.strip().split(maxsplit=1)
         action = parts[0] if parts else ""
         argument = parts[1] if len(parts) == 2 else ""
-        if action == "确认":
-            return await self.query("confirm", argument)
+        if action in CONFIRMATION_REPLIES:
+            return await self.query(CONFIRMATION_REPLIES[action], argument)
         if action in queries:
             return await self.query(queries[action], argument)
         if action in actions:
             return await self.query("prepare." + actions[action], argument)
         return help_text
+
+    @filter.regex(r"^(确认|取消)$")
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    async def confirm_or_cancel(self, event: AstrMessageEvent):
+        reply = event.get_message_str().strip()
+        operation = CONFIRMATION_REPLIES.get(reply)
+        if not self.allowed(event) or operation is None:
+            return
+        for part in message_parts(await self.query(operation)):
+            await event.send(event.plain_result(part))
+        event.stop_event()
 
     @filter.on_llm_request()
     async def limit_tool(self, event: AstrMessageEvent, req: ProviderRequest):
